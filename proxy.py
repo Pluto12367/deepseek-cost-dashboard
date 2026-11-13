@@ -1,12 +1,18 @@
 """反向代理:把请求透传到 api.deepseek.com,同时记账。
 
 - 非流式:等完整响应,解析 usage 精确计费,响应头附带本次估算费用(X-DSCD-*)
-- 流式(SSE):边转发边缓冲原始字节,结束后解析事件里的 usage 再入账
+- 流式(SSE):边转发边缓冲原始字节,结束后解析事件里的 usage 再入账;
+  可选自动注入 stream_options.include_usage,让流式请求也能精确统计 token
+- Key 分组:从 Authorization 自动识别调用方 Key(只存哈希与掩码,不落盘完整 Key)
 - 上游不可达/报错同样入账(便于排查),状态码原样透传
+- 上游地址可用环境变量 DEEPSEEK_UPSTREAM 覆盖(开发/测试用)
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import os
 import time
 from datetime import datetime
 
@@ -14,9 +20,10 @@ import httpx
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import db
-from estimator import BJT, estimate_call, find_usage, merge_usage
+import notify
+from estimator import BJT, estimate_call, find_usage, merge_usage, parse_usage
 
-UPSTREAM = "https://api.deepseek.com"
+UPSTREAM = os.environ.get("DEEPSEEK_UPSTREAM", "https://api.deepseek.com")
 
 HOP_HEADERS = {
     "host", "content-length", "connection", "keep-alive", "transfer-encoding",
@@ -78,7 +85,41 @@ def _budget_warning() -> str | None:
     return None
 
 
-def _record(ts: datetime, endpoint, protocol, model, status_code, latency_ms,
+def _key_id_from_headers(headers) -> str:
+    """从 Authorization 头识别调用方 Key,返回哈希 id 并登记掩码(不保存完整 Key)。"""
+    auth = (headers.get("authorization") or "").strip()
+    key = auth[7:].strip() if auth.lower().startswith("bearer ") else auth
+    if not key:
+        return ""
+    key_id = "k" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+    db.upsert_key(key_id, f"sk-***{key[-4:]}" if len(key) >= 8 else "sk-***")
+    return key_id
+
+
+def _maybe_inject_usage(path: str, req_json: dict, body: bytes) -> bytes:
+    """按设置对流式 chat completions 注入 stream_options.include_usage。
+
+    客户端显式设置 include_usage=false 时不覆盖;注入后重新序列化请求体。
+    """
+    if "chat/completions" not in path.lower():
+        return body
+    if db.get_setting("inject_usage") == "0":
+        return body
+    so = req_json.get("stream_options")
+    if so is False:
+        return body
+    if not isinstance(so, dict):
+        so = {}
+    if so.get("include_usage") is False:
+        return body  # 尊重客户端的显式关闭
+    if so.get("include_usage") is True:
+        return body
+    so["include_usage"] = True
+    req_json["stream_options"] = so
+    return json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+
+
+def _record(ts: datetime, endpoint, protocol, model, key_id, status_code, latency_ms,
             stream, breakdown, usage, error=None) -> None:
     u = usage or {}
     db.insert_call({
@@ -86,6 +127,7 @@ def _record(ts: datetime, endpoint, protocol, model, status_code, latency_ms,
         "endpoint": endpoint,
         "protocol": protocol,
         "model": model or "",
+        "key_id": key_id or "",
         "status_code": status_code,
         "latency_ms": latency_ms,
         "stream": 1 if stream else 0,
@@ -108,6 +150,8 @@ def _record(ts: datetime, endpoint, protocol, model, status_code, latency_ms,
         "source": "real",
         "error": error,
     })
+    # 真实流量入账后检查预算阈值,推送 Webhook(异步、去重、不阻塞)
+    asyncio.get_running_loop().create_task(notify.check_and_notify())
 
 
 async def forward(request, path: str):
@@ -120,15 +164,18 @@ async def forward(request, path: str):
         except ValueError:
             req_json = None
     is_stream = bool(isinstance(req_json, dict) and req_json.get("stream"))
+    if is_stream and isinstance(req_json, dict):
+        body = _maybe_inject_usage(path, req_json, body)
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
     url = "/" + path + (f"?{request.url.query}" if request.url.query else "")
     start = time.perf_counter()
     model = req_json.get("model") if isinstance(req_json, dict) else None
+    key_id = _key_id_from_headers(request.headers)
 
     try:
         if is_stream:
             return await _forward_stream(request.method, url, headers, body,
-                                         req_json, model, ts, start, path)
+                                         req_json, model, key_id, ts, start, path)
         resp = await _client.request(request.method, url, headers=headers, content=body)
         latency = int((time.perf_counter() - start) * 1000)
         resp_json = None
@@ -139,8 +186,8 @@ async def forward(request, path: str):
                 resp_json = None
         protocol, b = estimate_call(path, request.method, req_json, resp_json, ts)
         ok = resp.status_code < 400
-        _record(ts, "/" + path, protocol, model, resp.status_code, latency, False, b,
-                b.get("usage") if ok else None,
+        _record(ts, "/" + path, protocol, model, key_id, resp.status_code, latency,
+                False, b, b.get("usage") if ok else None,
                 None if ok else (resp.text or "")[:500])
         out_headers = _passthrough_headers(resp.headers)
         out_headers["X-DSCD-Cost-Total"] = f"{b['cost_total']:.6f}"
@@ -153,20 +200,20 @@ async def forward(request, path: str):
     except httpx.RequestError as e:
         latency = int((time.perf_counter() - start) * 1000)
         b = estimate_call(path, request.method, req_json, None, ts)[1]
-        _record(ts, "/" + path, "error", model, 502, latency, False, b, None,
+        _record(ts, "/" + path, "error", model, key_id, 502, latency, False, b, None,
                 f"upstream unreachable: {e.__class__.__name__}")
         return JSONResponse(status_code=502, content={
             "error": {"message": f"无法连接上游 {UPSTREAM}: {e}", "type": "proxy_error"}})
 
 
-async def _forward_stream(method, url, headers, body, req_json, model, ts, start, path):
+async def _forward_stream(method, url, headers, body, req_json, model, key_id, ts, start, path):
     req = _client.build_request(method, url, headers=headers, content=body)
     try:
         resp = await _client.send(req, stream=True)
     except httpx.RequestError as e:
         latency = int((time.perf_counter() - start) * 1000)
         b = estimate_call(path, method, req_json, None, ts)[1]
-        _record(ts, "/" + path, "error", model, 502, latency, True, b, None,
+        _record(ts, "/" + path, "error", model, key_id, 502, latency, True, b, None,
                 f"upstream unreachable: {e.__class__.__name__}")
         return JSONResponse(status_code=502, content={
             "error": {"message": f"无法连接上游 {UPSTREAM}: {e}", "type": "proxy_error"}})
@@ -190,8 +237,10 @@ async def _forward_stream(method, url, headers, body, req_json, model, ts, start
             usage = _parse_sse_usage(text) if status < 400 else None
             protocol, b = estimate_call(path, method, req_json,
                                         {"usage": usage} if usage else None, ts)
-            _record(ts, "/" + path, protocol, model, status, latency, True, b, usage,
-                    None if status < 400 else (text[-500:] or err_text[:500]))
+            # SSE 合并出的 usage 是原始键名,入库前归一化(与非流式路径一致)
+            usage_norm = parse_usage(usage) if usage else None
+            _record(ts, "/" + path, protocol, model, key_id, status, latency, True, b,
+                    usage_norm, None if status < 400 else (text[-500:] or err_text[:500]))
 
     return StreamingResponse(gen(), status_code=status,
                              headers=_passthrough_headers(resp.headers), media_type=ctype)

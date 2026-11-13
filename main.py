@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 import db
 import estimator
+import notify
 import proxy
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,44 +64,64 @@ def api_summary():
     return {**s, "budget": budget, "budget_progress": progress, "budget_warning": warn}
 
 
-def _filters(days: int, model: str, endpoint: str, source: str) -> dict:
+def _filters(days: int, model: str, endpoint: str, source: str, key_id: str = "") -> dict:
     d = max(1, min(int(days), 365)) if int(days) else None
     return {"days": d, "model": model or None,
-            "endpoint": endpoint or None, "source": source or None}
+            "endpoint": endpoint or None, "source": source or None,
+            "key_id": key_id or None}
 
 
 @app.get("/api/daily")
-def api_daily(days: int = 30, model: str = "", endpoint: str = "", source: str = ""):
-    return db.daily_series(**_filters(days, model, endpoint, source))
+def api_daily(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
+              key_id: str = ""):
+    return db.daily_series(**_filters(days, model, endpoint, source, key_id))
 
 
 @app.get("/api/breakdown")
-def api_breakdown(days: int = 30, model: str = "", endpoint: str = "", source: str = ""):
+def api_breakdown(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
+                  key_id: str = ""):
     names = {"cost_tokens": "模型 Token", "cost_search": "联网搜索",
              "cost_fetch": "网页抓取", "cost_ocr": "OCR",
              "cost_asr": "ASR", "cost_tts": "TTS"}
-    rows = db.breakdown(**_filters(days, model, endpoint, source))
+    rows = db.breakdown(**_filters(days, model, endpoint, source, key_id))
     return [{"category": names[r["k"]], "key": r["k"], "cost": r["v"]}
             for r in rows if r["v"] > 0]
 
 
 @app.get("/api/models")
-def api_models(days: int = 30, model: str = "", endpoint: str = "", source: str = ""):
-    return db.by_model(**_filters(days, model, endpoint, source))
+def api_models(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
+               key_id: str = ""):
+    return db.by_model(**_filters(days, model, endpoint, source, key_id))
+
+
+@app.get("/api/keys")
+def api_keys(days: int = 30, model: str = "", endpoint: str = "", source: str = ""):
+    return db.by_key(**_filters(days, model, endpoint, source))
+
+
+@app.post("/api/keys/label")
+async def api_keys_label(request: Request):
+    body = await request.json()
+    key_id = (body.get("key_id") or "").strip()
+    if not key_id:
+        return JSONResponse(status_code=400, content={"error": "缺少 key_id"})
+    db.set_key_label(key_id, (body.get("label") or "").strip())
+    return {"ok": True}
 
 
 @app.get("/api/calls")
 def api_calls(days: int = 7, model: str = "", endpoint: str = "", source: str = "",
-              limit: int = 20, offset: int = 0):
-    f = _filters(days, model, endpoint, source)
+              key_id: str = "", limit: int = 20, offset: int = 0):
+    f = _filters(days, model, endpoint, source, key_id)
     return {"rows": db.list_calls(limit=min(max(limit, 1), 200),
                                   offset=max(offset, 0), **f),
             "total": db.count_calls(**f)}
 
 
 @app.get("/api/calls/export.csv")
-def api_calls_csv(days: int = 7, model: str = "", endpoint: str = "", source: str = ""):
-    rows = db.export_rows(**_filters(days, model, endpoint, source))
+def api_calls_csv(days: int = 7, model: str = "", endpoint: str = "", source: str = "",
+                  key_id: str = ""):
+    rows = db.export_rows(**_filters(days, model, endpoint, source, key_id))
     buf = io.StringIO()
     buf.write("\ufeff")  # BOM:Excel 打开中文不乱码
     if rows:
@@ -118,7 +139,10 @@ def api_settings():
     masked = f"sk-***{key[-4:]}" if len(key) >= 8 else ("已设置" if key else "")
     raw = db.get_setting("monthly_budget")
     return {"monthly_budget": float(raw) if raw else None,
-            "has_key": bool(key), "api_key_masked": masked}
+            "has_key": bool(key), "api_key_masked": masked,
+            "inject_usage": db.get_setting("inject_usage") != "0",  # 默认开启
+            "webhook_url": db.get_setting("webhook_url") or "",
+            "webhook_last_result": db.get_setting("webhook_last_result") or ""}
 
 
 @app.post("/api/settings")
@@ -136,7 +160,21 @@ async def api_settings_post(request: Request):
             db.set_setting("api_key", v)
         else:
             db.delete_setting("api_key")
+    if "inject_usage" in body:
+        db.set_setting("inject_usage", "1" if body["inject_usage"] else "0")
+    if "webhook_url" in body:
+        v = (body["webhook_url"] or "").strip()
+        if v:
+            db.set_setting("webhook_url", v)
+        else:
+            db.delete_setting("webhook_url")
     return {"ok": True}
+
+
+@app.post("/api/webhook/test")
+async def api_webhook_test():
+    result = await notify.send_test()
+    return result
 
 
 @app.get("/api/prices")

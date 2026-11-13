@@ -12,6 +12,7 @@ const CAT_COLORS = {
 
 let charts = {};
 let pricesData = null;
+let keysCache = []; // [{key_id, name, masked, label, calls, cost}]
 let page = 0;
 const PAGE_SIZE = 20;
 
@@ -108,10 +109,63 @@ function chartFilters() {
   const m = $("#f-model").value.trim();
   const e = $("#f-endpoint").value.trim();
   const s = $("#f-source").value;
+  const k = $("#f-key").value;
   if (m) p.set("model", m);
   if (e) p.set("endpoint", e);
   if (s) p.set("source", s);
+  if (k) p.set("key_id", k);
   return p;
+}
+
+/* ---------- Key 分组 ---------- */
+
+async function loadKeys() {
+  const p = chartFilters();
+  keysCache = await api(`/api/keys?${p}`);
+  renderKeys();
+  renderKeyOptions();
+}
+
+function renderKeys() {
+  const body = $("#keys-body");
+  body.innerHTML = "";
+  const total = keysCache.reduce((s, k) => s + Number(k.cost || 0), 0);
+  for (const k of keysCache) {
+    const tr = document.createElement("tr");
+    const pct = total > 0 ? `${(Number(k.cost) / total * 100).toFixed(1)}%` : "-";
+    tr.innerHTML = `
+      <td>${k.name || "(未带 Key)"}</td>
+      <td class="hint">${k.masked || "-"}</td>
+      <td><input type="text" value="${(k.label || "").replace(/"/g, "&quot;")}"
+           placeholder="自定义标签" data-key-id="${k.key_id}"
+           style="width:110px;padding:4px 7px;border:1px solid var(--border);border-radius:6px;font-size:12.5px"></td>
+      <td>${k.calls}</td>
+      <td class="cost">${fmtCost(k.cost)}</td>
+      <td>${pct}</td>`;
+    body.appendChild(tr);
+  }
+  if (!keysCache.length) {
+    body.innerHTML = `<tr><td colspan="6" class="hint">暂无数据</td></tr>`;
+  }
+  body.querySelectorAll("input[data-key-id]").forEach((inp) => {
+    inp.addEventListener("change", async () => {
+      await post("/api/keys/label", { key_id: inp.dataset.keyId, label: inp.value });
+      flashMsg("label 已保存");
+      await loadKeys();
+    });
+  });
+}
+
+function renderKeyOptions() {
+  const sel = $("#f-key");
+  const cur = sel.value;
+  const opts = [`<option value="">全部 Key</option>`];
+  for (const k of keysCache) {
+    if (!k.key_id) continue;
+    opts.push(`<option value="${k.key_id}">${k.name || k.masked}</option>`);
+  }
+  sel.innerHTML = opts.join("");
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
 }
 
 async function loadCharts() {
@@ -207,6 +261,8 @@ async function loadCalls() {
     if (r.status_code >= 400) tr.className = "err";
     const tokens = `${fmtN(r.input_cache_hit)} / ${fmtN(r.input_cache_miss)} / ${fmtN(r.output_tokens)}`;
     const tools = `${fmtN(r.search_calls)} / ${fmtN(r.image_search_calls)} / ${fmtN(r.fetch_calls)}`;
+    const keyInfo = keysCache.find((k) => k.key_id === r.key_id);
+    const keyName = keyInfo ? keyInfo.name : (r.key_id || "-");
     const others = [];
     if (r.ocr_pages) others.push(`${fmtN(r.ocr_pages)} 页`);
     if (r.asr_seconds) others.push(`${Math.round(r.asr_seconds)}s 音频`);
@@ -224,6 +280,7 @@ async function loadCalls() {
       <td>${r.ts}</td>
       <td class="endpoint-cell" title="${r.protocol}">${r.endpoint}</td>
       <td>${r.model || "-"}</td>
+      <td>${keyName}</td>
       <td>${tokens}</td>
       <td>${tools}</td>
       <td>${others.join(" · ") || "-"}</td>
@@ -319,6 +376,9 @@ async function loadSettings() {
   const s = await api("/api/settings");
   $("#budget-input").value = s.monthly_budget ?? "";
   $("#key-masked").textContent = s.has_key ? `已保存:${s.api_key_masked}` : "";
+  $("#inject-usage").checked = !!s.inject_usage;
+  $("#webhook-url").value = s.webhook_url || "";
+  $("#webhook-last").textContent = s.webhook_last_result || "";
 }
 
 async function saveBudget() {
@@ -336,6 +396,23 @@ async function saveKey() {
   await Promise.all([loadSettings(), loadBalance()]);
 }
 
+async function saveInject() {
+  await post("/api/settings", { inject_usage: $("#inject-usage").checked });
+  flashMsg(`流式注入已${$("#inject-usage").checked ? "开启" : "关闭"}`);
+}
+
+async function saveWebhook() {
+  await post("/api/settings", { webhook_url: $("#webhook-url").value.trim() });
+  flashMsg("Webhook URL 已保存");
+  await loadSettings();
+}
+
+async function testWebhook() {
+  const r = await post("/api/webhook/test");
+  $("#webhook-last").textContent = r.result || r.reason || "";
+  flashMsg(r.ok ? "测试通知已发送" : "发送失败,见右侧结果", r.ok);
+}
+
 /* ---------- 事件与启动 ---------- */
 
 $("#refresh").addEventListener("click", () => refreshAll());
@@ -345,9 +422,12 @@ $("#next").addEventListener("click", () => { page++; loadCalls(); });
 $("#budget-save").addEventListener("click", saveBudget);
 $("#key-save").addEventListener("click", saveKey);
 $("#prices-save").addEventListener("click", savePrices);
+$("#inject-usage").addEventListener("change", saveInject);
+$("#webhook-save").addEventListener("click", saveWebhook);
+$("#webhook-test").addEventListener("click", testWebhook);
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadCharts(), loadCalls()]);
+  await Promise.all([loadSummary(), loadCharts(), loadKeys(), loadCalls()]);
 }
 
 setInterval(() => {

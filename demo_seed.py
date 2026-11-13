@@ -18,11 +18,22 @@ random.seed(42)
 # 偏向业务时段的抽样,让"高峰/空闲"价差看得出来
 HOURS = [8, 9, 9, 10, 10, 11, 11, 13, 14, 14, 15, 15, 16, 16, 17, 19, 20, 21, 22]
 
+# 演示用的三个 Key(与真实 Key 无关,仅用于展示分组统计)
+DEMO_KEYS = [
+    ("demokey-main", "sk-***f3a2", "个人主 Key"),
+    ("demokey-lab", "sk-***7c1d", "实验项目"),
+    ("demokey-bot", "sk-***9b8e", "社团 Bot"),
+]
+
 
 def _rand_ts(base_day: datetime) -> datetime:
     h = random.choice(HOURS)
     return base_day.replace(hour=h, minute=random.randint(0, 59),
                             second=random.randint(0, 59), microsecond=0)
+
+
+def _pick_key() -> str:
+    return random.choices([k[0] for k in DEMO_KEYS], weights=[0.6, 0.25, 0.15])[0]
 
 
 def _row(ts, endpoint, protocol, model, b, usage=None, status=200, stream=0,
@@ -31,6 +42,7 @@ def _row(ts, endpoint, protocol, model, b, usage=None, status=200, stream=0,
     return {
         "ts": ts.strftime("%Y-%m-%d %H:%M:%S"),
         "endpoint": endpoint, "protocol": protocol, "model": model,
+        "key_id": _pick_key(),
         "status_code": status, "latency_ms": latency or random.randint(400, 9000),
         "stream": stream,
         "input_cache_hit": u.get("cache_hit", 0),
@@ -95,6 +107,10 @@ def main(wipe: bool = False) -> None:
             c.execute("DELETE FROM calls WHERE source = 'demo'")
         print("已清除全部演示数据(真实调用记录保留)")
         return
+
+    for key_id, masked, label in DEMO_KEYS:
+        db.upsert_key(key_id, masked)
+        db.set_key_label(key_id, label)
 
     now = datetime.now(BJT)
     total, cost = 0, 0.0

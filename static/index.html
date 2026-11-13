@@ -127,6 +127,21 @@
 
   <section class="panel">
     <div class="panel-head">
+      <h2>Key 分组统计</h2>
+      <span class="hint">代理从 Authorization 自动识别调用方 Key(仅保存哈希与掩码,不落盘完整 Key);label 可自定义</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Key</th><th>掩码</th><th>label(可编辑)</th><th>调用数</th><th>费用</th><th>占比</th>
+        </tr></thead>
+        <tbody id="keys-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
       <h2>调用日志</h2>
       <div class="filters">
         <select id="f-days">
@@ -138,6 +153,7 @@
         </select>
         <input id="f-model" placeholder="模型筛选" style="width:130px">
         <input id="f-endpoint" placeholder="端点筛选" style="width:150px">
+        <select id="f-key"></select>
         <select id="f-source">
           <option value="">全部来源</option>
           <option value="real">真实调用</option>
@@ -150,7 +166,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>时间</th><th>端点</th><th>模型</th><th>Tokens(命中/未命中/输出)</th>
+          <th>时间</th><th>端点</th><th>模型</th><th>Key</th><th>Tokens(命中/未命中/输出)</th>
           <th>工具(搜/图/抓)</th><th>其他量</th><th>费用明细</th><th>合计</th><th>状态</th>
         </tr></thead>
         <tbody id="calls-body"></tbody>
@@ -179,6 +195,22 @@
     <input id="api-key" type="password" placeholder="sk-..." style="width:320px;padding:7px 9px;border:1px solid var(--border);border-radius:8px">
     <button id="key-save">保存 Key</button>
     <span class="hint" id="key-masked"></span>
+    <div style="margin-top:14px">
+      <label style="font-size:13px">
+        <input type="checkbox" id="inject-usage">
+        流式请求自动注入 <code>stream_options.include_usage</code>(仅作用于 /chat/completions;客户端显式关闭时不覆盖)
+      </label>
+    </div>
+    <div style="margin-top:14px">
+      <b style="font-size:13px">Webhook 预算告警</b>
+      <span class="hint">月花费达 80% 推送 budget_warning、100% 推送 budget_exceeded(每级别每月一次);POST JSON 到下方 URL</span>
+      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
+        <input id="webhook-url" type="url" placeholder="https://example.com/hook" style="width:340px;padding:7px 9px;border:1px solid var(--border);border-radius:8px">
+        <button id="webhook-save">保存 URL</button>
+        <button class="ghost" id="webhook-test">发送测试</button>
+        <span class="hint" id="webhook-last"></span>
+      </div>
+    </div>
   </details>
 </main>
 
