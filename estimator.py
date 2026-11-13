@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 from datetime import datetime, timedelta, timezone
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-PRICES_FILE = os.path.join(_DIR, "prices.json")
+import db as _db  # noqa: E402  复用数据目录定义(DSCD_DATA_DIR)
+
+PRICES_FILE = os.path.join(_db.DATA_DIR, "prices.json")
+_DEFAULT_PRICES = os.path.join(_DIR, "prices.json")
+if not os.path.exists(PRICES_FILE) and os.path.exists(_DEFAULT_PRICES) \
+        and PRICES_FILE != _DEFAULT_PRICES:
+    shutil.copy(_DEFAULT_PRICES, PRICES_FILE)  # 首次在独立数据目录运行时带入默认价格表
 BJT = timezone(timedelta(hours=8))  # 北京时间
 
 _lock = threading.Lock()

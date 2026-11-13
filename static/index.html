@@ -286,7 +286,7 @@
 
   <details class="panel" id="integrate">
     <summary><h2>接入你的应用(点开复制代码)</h2></summary>
-    <p class="hint">把 base_url 指向本代理即可自动记账;API Key 原样透传,面板零改动。</p>
+    <p class="hint">把 base_url 指向本代理即可自动记账;API Key 原样透传,面板零改动。若在「设置」中启用了访问令牌,请求还需带头 <code>X-DSCD-Token: 你的令牌</code>。</p>
     <div class="snip">
       <h3><span>Python(openai SDK)</span><button class="ghost copy-btn" data-copy="snip-py">复制</button></h3>
       <pre id="snip-py">from openai import OpenAI
@@ -400,6 +400,16 @@ const res = await client.chat.completions.create({
         <input type="checkbox" id="inject-usage">
         流式请求自动注入 <code>stream_options.include_usage</code>(仅作用于 /chat/completions;客户端显式关闭时不覆盖)
       </label>
+    </div>
+    <div style="margin-top:14px">
+      <b style="font-size:13px">访问令牌(公网部署必开)</b>
+      <span class="hint">设置后:面板需登录、代理端请求需带 <code>X-DSCD-Token: 令牌</code> 头;环境变量 DSCD_TOKEN 优先且不可在此修改。本地单机使用可不设置。</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="access-token" type="password" placeholder="新令牌" style="width:220px;padding:7px 9px;border-radius:8px">
+        <button id="token-save">保存并登录</button>
+        <button class="ghost" id="token-clear">清除令牌</button>
+        <span class="hint" id="token-state" style="margin:0"></span>
+      </div>
     </div>
     <div style="margin-top:14px">
       <b style="font-size:13px">监控偏好</b>

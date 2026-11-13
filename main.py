@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import os
 import calendar
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import db
@@ -25,6 +26,7 @@ import proxy
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(_DIR, "static")
+COOKIE_NAME = "dscd_token"
 
 
 @asynccontextmanager
@@ -40,6 +42,134 @@ async def lifespan(_app):
 
 app = FastAPI(title="DeepSeek Cost Dashboard", lifespan=lifespan,
               docs_url=None, redoc_url=None)
+
+
+# ---------- 访问令牌鉴权(可选;公网部署必须开启) ----------
+
+def _configured_token() -> str:
+    """优先环境变量 DSCD_TOKEN,其次面板里保存的令牌。未配置 = 鉴权关闭。"""
+    return os.environ.get("DSCD_TOKEN") or (db.get_setting("access_token") or "")
+
+
+def _provided_token(request) -> str:
+    return (request.headers.get("x-dscd-token")
+            or request.query_params.get("token")
+            or request.cookies.get(COOKIE_NAME)
+            or "").strip()
+
+
+def _authed(request) -> bool:
+    cfg = _configured_token()
+    if not cfg:
+        return True
+    return hmac.compare_digest(_provided_token(request), cfg)
+
+
+class AuthMiddleware:
+    """纯 ASGI 中间件(不用 BaseHTTPMiddleware,避免缓冲破坏 SSE 流式)。
+
+    未配置令牌时完全放行(本地默认形态);配置后,除登录页外全部校验。
+    """
+
+    EXEMPT = {"/login", "/api/login", "/favicon.ico"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and _configured_token():
+            path = scope.get("path", "")
+            if path not in self.EXEMPT:
+                request = Request(scope)
+                if not _authed(request):
+                    if path.startswith("/ui") or path == "/" or path.startswith("/static"):
+                        await RedirectResponse("/login", 302)(scope, receive, send)
+                        return
+                    resp = JSONResponse(status_code=401, content={
+                        "error": {"message": "未授权:请携带访问令牌"
+                                  "(X-DSCD-Token 头 / ?token= / 登录 Cookie)",
+                                  "type": "auth_error"}})
+                    await resp(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AuthMiddleware)
+
+
+@app.get("/login")
+def login_page():
+    return HTMLResponse(LOGIN_HTML)
+
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    body = await request.json()
+    tok = (body.get("token") or "").strip()
+    cfg = _configured_token()
+    if not cfg:
+        return JSONResponse(status_code=400,
+                            content={"error": "未启用访问令牌,无需登录"})
+    if not tok or not hmac.compare_digest(tok, cfg):
+        return JSONResponse(status_code=401, content={"error": "令牌错误"})
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(COOKIE_NAME, tok, httponly=True, samesite="lax",
+                    max_age=30 * 24 * 3600, path="/")
+    return resp
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · DeepSeek 成本监控面板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23637bff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='13' fill='url(%23g)'/%3E%3C/svg%3E">
+<style>
+  :root { --bg:#0f1115; --panel:#161a22; --border:#262c38; --text:#e8eaf0;
+          --muted:#8b93a7; --grad:linear-gradient(135deg,#637bff,#22d3ee); }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:var(--bg); color:var(--text);
+         font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  .box { width:340px; background:var(--panel); border:1px solid var(--border);
+         border-radius:14px; padding:28px; }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .dot { width:12px; height:12px; border-radius:50%; background:var(--grad);
+         box-shadow:0 0 10px rgba(99,123,255,.8); }
+  h1 { font-size:16px; margin:0; }
+  p { color:var(--muted); font-size:12px; margin:4px 0 18px; }
+  input { width:100%; padding:9px 11px; border:1px solid var(--border); border-radius:8px;
+          background:#1c212b; color:var(--text); font-size:13px; margin-bottom:12px; }
+  button { width:100%; padding:9px; border:none; border-radius:8px; background:var(--grad);
+           color:#fff; font-size:13px; cursor:pointer; }
+  .err { color:#f87171; font-size:12px; min-height:16px; margin-top:10px; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="brand"><span class="dot"></span><h1>DeepSeek 成本监控面板</h1></div>
+    <p>本站已启用访问令牌保护,请输入令牌登录</p>
+    <input id="token" type="password" placeholder="访问令牌" autofocus>
+    <button onclick="go()">登 录</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script>
+    async function go() {
+      const t = document.getElementById("token").value.trim();
+      if (!t) return;
+      const r = await fetch("/api/login", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: t }) });
+      if (r.ok) { location.href = "/ui"; return; }
+      const d = await r.json().catch(() => ({}));
+      document.getElementById("err").textContent = d.error || "登录失败";
+    }
+    document.getElementById("token").addEventListener("keydown",
+      e => { if (e.key === "Enter") go(); });
+  </script>
+</body>
+</html>"""
 
 
 # ---------- REST API(注意:必须注册在兜底代理路由之前) ----------
@@ -171,7 +301,9 @@ def api_settings():
             "webhook_type": db.get_setting("webhook_type") or "generic",
             "webhook_last_result": db.get_setting("webhook_last_result") or "",
             "cost_alert_threshold": float(thr) if thr else 0.5,
-            "retention_days": int(ret) if ret else 90}
+            "retention_days": int(ret) if ret else 90,
+            "has_access_token": bool(_configured_token()),
+            "token_from_env": bool(os.environ.get("DSCD_TOKEN"))}
 
 
 @app.post("/api/settings")
@@ -205,6 +337,17 @@ async def api_settings_post(request: Request):
     if "retention_days" in body:
         v = body["retention_days"]
         db.set_setting("retention_days", str(int(v)) if v and int(v) > 0 else "90")
+    if "access_token" in body:  # 设置/清除访问令牌;保存者自动登录(证明已知晓令牌)
+        v = (body["access_token"] or "").strip()
+        resp = JSONResponse({"ok": True})
+        if v:
+            db.set_setting("access_token", v)
+            resp.set_cookie(COOKIE_NAME, v, httponly=True, samesite="lax",
+                            max_age=30 * 24 * 3600, path="/")
+        else:
+            db.delete_setting("access_token")
+            resp.delete_cookie(COOKIE_NAME, path="/")
+        return resp
     return {"ok": True}
 
 
@@ -290,8 +433,11 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    print("面板:      http://127.0.0.1:8787/ui")
-    print("代理地址:   http://127.0.0.1:8787  (base_url 指向这里即可记账)")
+    port = int(os.environ.get("PORT", "8787"))
+    print(f"面板:      http://127.0.0.1:{port}/ui")
+    print(f"代理地址:   http://127.0.0.1:{port}  (base_url 指向这里即可记账)")
+    if _configured_token():
+        print("鉴权:      已启用访问令牌(面板登录 / 代理需 X-DSCD-Token 头)")
     if os.environ.get("DSCD_NO_BROWSER") != "1":  # 启动后自动打开面板
-        threading.Timer(1.5, webbrowser.open, ["http://127.0.0.1:8787/ui"]).start()
-    uvicorn.run(app, host="127.0.0.1", port=8787)
+        threading.Timer(1.5, webbrowser.open, [f"http://127.0.0.1:{port}/ui"]).start()
+    uvicorn.run(app, host="0.0.0.0", port=port)

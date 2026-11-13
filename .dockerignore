@@ -1,0 +1,12 @@
+.git
+.gitignore
+data.db
+__pycache__/
+*.pyc
+.venv/
+.zcode-site/
+.zcode-site.json
+start.bat
+start.sh
+Dockerfile
+.dockerignore

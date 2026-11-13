@@ -3,3 +3,4 @@ __pycache__/
 data.db
 static/vendor/
 .venv/
+.zcode-site/

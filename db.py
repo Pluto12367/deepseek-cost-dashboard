@@ -5,8 +5,11 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_DIR, "data.db")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Docker/云部署时用 DSCD_DATA_DIR 把数据落到挂载卷;默认跟随源码目录
+DATA_DIR = os.environ.get("DSCD_DATA_DIR") or APP_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "data.db")
 
 # 与前端图表/CSV 导出一致的列顺序
 COST_COLS = ("cost_tokens", "cost_search", "cost_fetch",

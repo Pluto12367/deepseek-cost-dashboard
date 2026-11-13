@@ -75,6 +75,7 @@ const fmtN = (n) => {
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = "/login"; throw new Error("未授权"); }
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json();
 }
@@ -594,6 +595,25 @@ async function loadSettings() {
   $("#cost-threshold").value = s.cost_alert_threshold;
   $("#retention-days").value = s.retention_days;
   thresholdCache = Number(s.cost_alert_threshold) || 0.5;
+  $("#token-state").textContent = s.has_access_token
+    ? (s.token_from_env ? "已启用(由环境变量 DSCD_TOKEN 配置)" : "已启用")
+    : "未启用(本地模式,所有请求放行)";
+  $("#access-token").placeholder = s.has_access_token && !s.token_from_env ? "输入新令牌可覆盖" : "设置访问令牌";
+}
+
+async function saveAccessToken() {
+  const v = $("#access-token").value.trim();
+  if (!v) return flashMsg("令牌不能为空", false);
+  await post("/api/settings", { access_token: v });
+  $("#access-token").value = "";
+  flashMsg("访问令牌已启用,本浏览器已自动登录");
+  await loadSettings();
+}
+
+async function clearAccessToken() {
+  await post("/api/settings", { access_token: "" });
+  flashMsg("访问令牌已清除,回到本地开放模式");
+  await loadSettings();
 }
 
 async function saveBudget() {
@@ -726,6 +746,8 @@ $("#cleanup-now").addEventListener("click", cleanupNow);
 $("#notify-desktop").addEventListener("change", toggleDesktopNotify);
 $("#demo-seed").addEventListener("click", seedDemo);
 $("#demo-wipe").addEventListener("click", wipeDemo);
+$("#token-save").addEventListener("click", saveAccessToken);
+$("#token-clear").addEventListener("click", clearAccessToken);
 
 // 筛选变更即生效(免点查询);文本输入做 400ms 防抖
 let filterTimer = null;

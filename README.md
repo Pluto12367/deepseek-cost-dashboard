@@ -93,9 +93,29 @@ tests/         mock 上游与 Webhook 接收器(零费用端到端测试)
 
 ## Key 分组与隐私
 
-- 全部数据存在本机 `data.db`,不出本机
+- 全部数据存在本机 `data.db`(可用 `DSCD_DATA_DIR` 重定向到挂载卷),不出本机
 - 代理从每次请求的 `Authorization` 头识别调用方 Key,**只保存 SHA-256 哈希前缀与 `sk-***尾4位` 掩码**,完整 Key 不落盘;面板可为每个 Key 设置 label,统计与筛选全链路生效
-- 面板「设置」中保存的 API Key 仅用于轮询 `/user/balance`,请勿在公共服务上部署本面板;如需共享部署,请自行增加鉴权
+- 面板「设置」中保存的 API Key 仅用于轮询 `/user/balance`
+
+## 访问令牌(公网部署必开)
+
+默认**本地开放模式**(不设令牌,一切放行)。要公网部署时,在面板「设置 → 访问令牌」设置令牌,或用环境变量 `DSCD_TOKEN`(优先级更高):
+
+- 面板访问:浏览器访问 `/ui` 会跳转 `/login` 登录,登录后写 HttpOnly Cookie
+- 代理访问:应用请求加头 `X-DSCD-Token: 你的令牌`(也可用 `?token=` 查询参数)
+- 未携带/错误令牌 → `401 {"error":{"type":"auth_error",...}}`
+
+## Docker 部署
+
+```bash
+docker build -t dscd .
+docker run -d --name dscd -p 8787:8787 \
+  -v dscd-data:/data \                # 账单数据持久化
+  -e DSCD_TOKEN=你的访问令牌 \          # 公网部署强烈建议
+  dscd
+```
+
+端口、数据目录分别可用 `PORT` / `DSCD_DATA_DIR` 环境变量调整。
 
 ## Webhook 告警
 
