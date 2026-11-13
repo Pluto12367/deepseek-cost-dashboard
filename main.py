@@ -43,6 +43,12 @@ def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+@app.get("/favicon.ico")
+def favicon():
+    # 避免浏览器自动请求被兜底代理转发并在日志里产生噪音
+    return Response(status_code=204)
+
+
 @app.get("/ui")
 def ui():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))

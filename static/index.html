@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,93 +7,189 @@
 <script src="/static/vendor/chart.umd.min.js"
         onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'"></script>
 <style>
+  /* ---------- 设计 token(深色默认,浅色经 [data-theme=light] 覆盖) ---------- */
   :root {
-    --bg: #f2f4fa; --panel: #ffffff; --text: #1f2430; --muted: #6b7280;
-    --accent: #4f6ef7; --border: #e5e8f0;
-    --green: #22c55e; --amber: #f59e0b; --red: #ef4444;
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1c212b;
+    --border: #262c38;
+    --text: #e8eaf0;
+    --muted: #8b93a7;
+    --faint: #5b6274;
+    --accent: #637bff;
+    --accent-2: #22d3ee;
+    --grad: linear-gradient(135deg, #637bff, #22d3ee);
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --grid: rgba(255, 255, 255, .06);
+    --shadow: 0 1px 3px rgba(0, 0, 0, .4);
+    --hover: rgba(99, 123, 255, .07);
   }
+  [data-theme="light"] {
+    --bg: #f5f6fa;
+    --panel: #ffffff;
+    --panel-2: #f0f2f8;
+    --border: #e4e7f0;
+    --text: #1a2030;
+    --muted: #6b7280;
+    --faint: #9aa1b2;
+    --grid: rgba(20, 25, 40, .07);
+    --shadow: 0 1px 4px rgba(30, 40, 80, .07);
+    --hover: rgba(99, 123, 255, .06);
+  }
+
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
-         font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+         font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+         transition: background .25s, color .25s; }
+
+  /* 数字统一等宽 + 右对齐,表格对比立刻整齐 */
+  .num, .value, .cost, td.r, .bar-note b {
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
   header { display: flex; justify-content: space-between; align-items: center;
-           padding: 20px 28px 6px; flex-wrap: wrap; gap: 8px; }
-  header h1 { font-size: 20px; margin: 0; }
-  header .sub { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+           padding: 22px 28px 4px; flex-wrap: wrap; gap: 10px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo-dot { width: 12px; height: 12px; border-radius: 50%;
+              background: var(--grad); box-shadow: 0 0 10px rgba(99, 123, 255, .8); }
+  header h1 { font-size: 19px; margin: 0; letter-spacing: .3px; }
+  .ver { font-size: 10px; color: var(--muted); border: 1px solid var(--border);
+         padding: 2px 8px; border-radius: 999px; }
+  header .sub { color: var(--muted); font-size: 12px; margin: 5px 0 0 22px; }
   header .meta { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
-  main { padding: 14px 28px 30px; display: flex; flex-direction: column; gap: 16px; }
 
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
-  .card { background: var(--panel); border-radius: 14px; padding: 16px 18px;
-          box-shadow: 0 1px 4px rgba(31,36,48,.06); }
+  main { padding: 14px 28px 10px; display: flex; flex-direction: column; gap: 16px; }
+
+  /* ---------- 概览卡片 ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+          padding: 16px 18px 14px; box-shadow: var(--shadow); position: relative; overflow: hidden; }
   .card .label { color: var(--muted); font-size: 12px; }
-  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; letter-spacing: .3px; }
-  .card .foot { color: var(--muted); font-size: 11px; margin-top: 6px; }
+  .card .value { font-size: 25px; font-weight: 700; margin-top: 8px; letter-spacing: .3px; }
+  .card .foot { color: var(--faint); font-size: 11px; margin-top: 7px; display: flex;
+                gap: 8px; align-items: center; }
+  .card.hero { border-top: 2px solid transparent;
+               background: linear-gradient(var(--panel), var(--panel)) padding-box,
+                           var(--grad) border-box; }
+  .card.hero .value { background: var(--grad); -webkit-background-clip: text;
+                      background-clip: text; color: transparent; }
+  .trend { font-size: 11px; }
+  .trend.up { color: var(--red); }
+  .trend.down { color: var(--green); }
 
-  .panel { background: var(--panel); border-radius: 14px; padding: 16px 18px;
-           box-shadow: 0 1px 4px rgba(31,36,48,.06); }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* ---------- 预算 ---------- */
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+           padding: 16px 18px; box-shadow: var(--shadow); }
   .panel h2 { font-size: 14px; margin: 0 0 12px; }
   .panel-head { display: flex; justify-content: space-between; align-items: center;
                 flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
   .panel-head h2 { margin: 0; }
+  .panel-head .hint { margin: 0; }
 
-  .budget { display: flex; flex-direction: column; gap: 8px; }
-  .budget-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+  .budget-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                 font-size: 13px; }
   .budget-head input { width: 130px; padding: 5px 8px; border: 1px solid var(--border);
                        border-radius: 8px; font-size: 13px; }
   .budget-head .warn { color: var(--red); font-weight: 600; }
-  .bar { height: 10px; background: #edf0f7; border-radius: 999px; overflow: hidden; }
+  .bar-line { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .bar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
   .bar .fill { height: 100%; width: 0; background: var(--green); border-radius: 999px;
-               transition: width .4s; }
-  .bar-note { color: var(--muted); font-size: 12px; }
+               transition: width .4s, background .4s; }
+  .pill { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+          background: var(--panel-2); color: var(--muted); min-width: 46px; text-align: center; }
+  .pill.g { color: var(--green); background: rgba(52, 211, 153, .12); }
+  .pill.a { color: var(--amber); background: rgba(251, 191, 36, .12); }
+  .pill.r { color: var(--red); background: rgba(248, 113, 113, .12); }
+  .bar-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
 
+  /* ---------- 图表 ---------- */
   .charts { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; }
   @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
-  .chart-box { position: relative; height: 260px; }
+  .chart-box { position: relative; height: 250px; }
+  .empty { position: absolute; inset: 0; display: none; align-items: center;
+           justify-content: center; flex-direction: column; gap: 6px;
+           color: var(--faint); font-size: 12.5px; text-align: center; line-height: 1.8; }
+  .empty.show { display: flex; }
 
+  /* ---------- 表格 ---------- */
   .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .filters select, .filters input { padding: 6px 9px; border: 1px solid var(--border);
-    border-radius: 8px; font-size: 13px; background: #fff; }
-  button, .btn { background: var(--accent); color: #fff; border: none; border-radius: 8px;
-    padding: 7px 14px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
-  button.ghost { background: #eef1f8; color: var(--text); }
+  input, select { background: var(--panel-2); color: var(--text);
+                  border: 1px solid var(--border); }
+  .filters select, .filters input { padding: 6px 9px; border-radius: 8px; font-size: 13px; }
+  button, .btn { background: var(--grad); color: #fff; border: none; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; cursor: pointer; text-decoration: none;
+    display: inline-block; transition: filter .15s, transform .05s; }
+  button:hover, .btn:hover { filter: brightness(1.12); }
+  button:active { transform: translateY(1px); }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--panel-2); filter: none; }
+  button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
 
-  .table-wrap { overflow-x: auto; }
+  .table-wrap { overflow-x: auto; border-radius: 10px; }
   table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
   th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px;
-       border-bottom: 1px solid var(--border); white-space: nowrap; }
-  td { padding: 7px 10px; border-bottom: 1px solid #f0f2f8; white-space: nowrap; }
-  tr.err td { background: #fef2f2; }
-  tr.err .endpoint-cell { color: var(--red); }
-  .cost { font-weight: 700; }
-  .badge { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 999px;
-           background: #eef1f8; color: var(--muted); }
-  .badge.err { background: #fee2e2; color: var(--red); }
+       border-bottom: 1px solid var(--border); white-space: nowrap;
+       position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  th.r, td.r { text-align: right; }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border);
+       white-space: nowrap; color: var(--text); }
+  tbody tr { transition: background .12s; }
+  tbody tr:hover { background: var(--hover); }
+  tr.err td { background: rgba(248, 113, 113, .06); }
+  .cost { font-weight: 700; color: var(--text); }
+  .zero { color: var(--faint); }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 8px; border-radius: 999px;
+           background: var(--panel-2); color: var(--muted); }
+  .badge.demo { background: rgba(167, 139, 250, .14); color: #a78bfa; }
+  .badge.stream { background: rgba(99, 123, 255, .16); color: #8fa0ff; }
+  .badge.ok { background: rgba(52, 211, 153, .13); color: var(--green); }
+  .badge.err { background: rgba(248, 113, 113, .15); color: var(--red); }
   .pager { display: flex; align-items: center; gap: 12px; justify-content: flex-end;
            margin-top: 10px; font-size: 12px; color: var(--muted); }
 
-  details.panel summary { cursor: pointer; }
+  /* ---------- 折叠面板 ---------- */
+  details.panel summary { cursor: pointer; user-select: none; }
   details.panel summary h2 { display: inline; }
   .price-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
                 gap: 14px; margin-top: 12px; }
-  .price-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .price-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+                background: var(--panel-2); }
   .price-card h3 { margin: 0 0 8px; font-size: 13px; }
   .price-card .row { display: flex; justify-content: space-between; align-items: center;
                      font-size: 12.5px; padding: 3px 0; gap: 8px; }
   .price-card .row span:first-child { color: var(--muted); }
-  .price-card input { width: 100px; padding: 4px 7px; border: 1px solid var(--border);
-                      border-radius: 6px; font-size: 12.5px; text-align: right; }
+  .price-card input { width: 100px; padding: 4px 7px; border-radius: 6px;
+                      font-size: 12.5px; text-align: right; }
   .hint { color: var(--muted); font-size: 12px; margin: 6px 0 10px; }
-  footer { color: var(--muted); font-size: 11.5px; padding: 0 28px 26px; line-height: 1.7; }
+  .keys-input { width: 110px; padding: 4px 7px; border: 1px solid var(--border);
+                border-radius: 6px; font-size: 12.5px; background: var(--panel-2);
+                color: var(--text); }
   #msg { font-size: 12px; color: var(--green); }
+  code { background: var(--panel-2); border-radius: 5px; padding: 1px 6px;
+         font-size: 11.5px; font-family: Consolas, Menlo, monospace; }
+
+  footer { color: var(--faint); font-size: 11.5px; padding: 4px 28px 26px; line-height: 1.8; }
+  ::selection { background: rgba(99, 123, 255, .35); }
 </style>
 </head>
 <body>
 <header>
   <div>
-    <h1>DeepSeek 成本监控面板</h1>
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <h1>DeepSeek 成本监控面板</h1>
+      <span class="ver">v0.3.0</span>
+    </div>
     <p class="sub">本地代理记账 · 精确到每次调用 · 数据不出本机</p>
   </div>
   <div class="meta">
+    <button class="ghost" id="theme-toggle" title="切换深浅主题">🌙 深色</button>
     <span id="clock"></span>
     <button class="ghost" id="refresh">刷新</button>
   </div>
@@ -101,28 +197,46 @@
 
 <main>
   <section class="cards">
-    <div class="card"><div class="label">今日花费</div><div class="value" id="c-today">--</div><div class="foot" id="c-today-n"></div></div>
-    <div class="card"><div class="label">本月花费</div><div class="value" id="c-month">--</div><div class="foot" id="c-month-n"></div></div>
-    <div class="card"><div class="label">累计花费</div><div class="value" id="c-total">--</div><div class="foot" id="c-total-n"></div></div>
-    <div class="card"><div class="label">账户余额</div><div class="value" id="c-balance">--</div><div class="foot" id="c-balance-foot">未配置 Key</div></div>
+    <div class="card hero"><div class="label">今日花费</div><div class="value num" id="c-today">--</div><div class="foot"><span id="c-today-n"></span><span class="trend" id="c-today-trend"></span></div></div>
+    <div class="card"><div class="label">本月花费</div><div class="value num" id="c-month">--</div><div class="foot" id="c-month-n"></div></div>
+    <div class="card"><div class="label">累计花费</div><div class="value num" id="c-total">--</div><div class="foot" id="c-total-n"></div></div>
+    <div class="card"><div class="label">账户余额</div><div class="value num" id="c-balance">--</div><div class="foot" id="c-balance-foot">未配置 Key</div></div>
   </section>
 
   <section class="panel budget">
     <div class="budget-head">
       <b>月预算</b>
-      <input id="budget-input" type="number" min="0" step="0.5" placeholder="预算(元)">
+      <input id="budget-input" class="num" type="number" min="0" step="0.5" placeholder="预算(元)">
       <button id="budget-save">保存</button>
       <span id="budget-warning" class="warn"></span>
       <span id="msg"></span>
     </div>
-    <div class="bar"><div id="budget-fill" class="fill"></div></div>
-    <div class="bar-note" id="budget-note">未设置预算。设置后,月花费达到 80% 预警、100% 告警(代理响应头 X-DSCD-Budget-Warning 同步提示)。</div>
+    <div class="bar-line">
+      <div class="bar"><div id="budget-fill" class="fill"></div></div>
+      <span class="pill" id="budget-pill">--</span>
+    </div>
+    <div class="bar-note" id="budget-note">未设置预算。设置后,月花费达 80% 预警、100% 告警(代理响应头 X-DSCD-Budget-Warning 同步提示)。</div>
   </section>
 
   <section class="charts">
-    <div class="panel"><h2>每日花费(按类别堆叠,折线为合计)</h2><div class="chart-box"><canvas id="chart-daily"></canvas></div></div>
-    <div class="panel"><h2>费用构成</h2><div class="chart-box"><canvas id="chart-breakdown"></canvas></div></div>
-    <div class="panel"><h2>模型花费对比</h2><div class="chart-box"><canvas id="chart-models"></canvas></div></div>
+    <div class="panel">
+      <h2>每日花费 <span class="hint" style="margin:0">(按类别堆叠 · 细线为合计)</span></h2>
+      <div class="chart-box"><canvas id="chart-daily"></canvas>
+        <div class="empty" id="empty-daily">暂无数据<br>运行 <code>python demo_seed.py</code> 生成演示数据,或经代理发送真实调用</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>费用构成</h2>
+      <div class="chart-box"><canvas id="chart-breakdown"></canvas>
+        <div class="empty" id="empty-breakdown">暂无数据</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>模型花费对比</h2>
+      <div class="chart-box"><canvas id="chart-models"></canvas>
+        <div class="empty" id="empty-models">暂无数据</div>
+      </div>
+    </div>
   </section>
 
   <section class="panel">
@@ -133,7 +247,8 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Key</th><th>掩码</th><th>label(可编辑)</th><th>调用数</th><th>费用</th><th>占比</th>
+          <th>Key</th><th>掩码</th><th>label(可编辑)</th>
+          <th class="r">调用数</th><th class="r">费用</th><th class="r">占比</th>
         </tr></thead>
         <tbody id="keys-body"></tbody>
       </table>
@@ -166,8 +281,9 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>时间</th><th>端点</th><th>模型</th><th>Key</th><th>Tokens(命中/未命中/输出)</th>
-          <th>工具(搜/图/抓)</th><th>其他量</th><th>费用明细</th><th>合计</th><th>状态</th>
+          <th>时间</th><th>端点</th><th>模型</th><th>Key</th>
+          <th class="r">Tokens(命中/未命中/输出)</th><th class="r">工具(搜/图/抓)</th>
+          <th>其他量</th><th>费用明细</th><th class="r">合计</th><th>状态</th>
         </tr></thead>
         <tbody id="calls-body"></tbody>
       </table>
@@ -192,7 +308,7 @@
   <details class="panel">
     <summary><h2>设置(API Key 仅用于查询余额)</h2></summary>
     <p class="hint">Key 只保存在本机 data.db,用于轮询官方 /user/balance;面板不产生任何调用费用。</p>
-    <input id="api-key" type="password" placeholder="sk-..." style="width:320px;padding:7px 9px;border:1px solid var(--border);border-radius:8px">
+    <input id="api-key" type="password" placeholder="sk-..." style="width:320px;padding:7px 9px;border-radius:8px">
     <button id="key-save">保存 Key</button>
     <span class="hint" id="key-masked"></span>
     <div style="margin-top:14px">
@@ -205,7 +321,7 @@
       <b style="font-size:13px">Webhook 预算告警</b>
       <span class="hint">月花费达 80% 推送 budget_warning、100% 推送 budget_exceeded(每级别每月一次);POST JSON 到下方 URL</span>
       <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
-        <input id="webhook-url" type="url" placeholder="https://example.com/hook" style="width:340px;padding:7px 9px;border:1px solid var(--border);border-radius:8px">
+        <input id="webhook-url" type="url" placeholder="https://example.com/hook" style="width:340px;padding:7px 9px;border-radius:8px">
         <button id="webhook-save">保存 URL</button>
         <button class="ghost" id="webhook-test">发送测试</button>
         <span class="hint" id="webhook-last"></span>
@@ -216,7 +332,7 @@
 
 <footer>
   估算口径:官方刊例价 × 每次调用返回的 usage 计数,仅供监控参考,以官方账单为准。
-  高峰时段 = 北京时间周一至周五 9:00–12:00、14:00–18:00。流式请求若未开启 stream_options.include_usage,token 用量可能无法统计(工具次数仍可统计)。
+  高峰时段 = 北京时间周一至周五 9:00–12:00、14:00–18:00。流式请求默认注入 stream_options.include_usage,关闭后未开启该选项的流式 token 用量可能无法统计(工具次数仍可统计)。
 </footer>
 
 <script src="/static/app.js"></script>

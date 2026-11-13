@@ -1,13 +1,52 @@
-/* DeepSeek 成本监控面板前端逻辑 */
+/* DeepSeek 成本监控面板前端逻辑(深色数据工作台) */
 const $ = (s) => document.querySelector(s);
+
+/* ---------- 主题 ---------- */
+
+const THEME_KEY = "dscd-theme";
+
+function currentTheme() {
+  return document.documentElement.dataset.theme || "dark";
+}
+
+function themeColors() {
+  const dark = currentTheme() === "dark";
+  return {
+    tick: dark ? "#8b93a7" : "#6b7280",
+    grid: dark ? "rgba(255,255,255,.06)" : "rgba(20,25,40,.08)",
+    border: dark ? "rgba(255,255,255,.10)" : "rgba(20,25,40,.12)",
+    legend: dark ? "#8b93a7" : "#6b7280",
+    total: dark ? "#e8eaf0" : "#1a2030",
+    center: dark ? "#e8eaf0" : "#1a2030",
+  };
+}
+
+$("#theme-toggle")?.addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem(THEME_KEY, next);
+  $("#theme-toggle").textContent = next === "dark" ? "🌙 深色" : "☀️ 浅色";
+  loadCharts(); // 图表配色随主题重绘
+});
+
+(function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved) document.documentElement.dataset.theme = saved;
+  document.addEventListener("DOMContentLoaded", () => {
+    $("#theme-toggle").textContent =
+      currentTheme() === "dark" ? "🌙 深色" : "☀️ 浅色";
+  });
+})();
+
+/* ---------- 常量与格式化 ---------- */
 
 const CAT_NAMES = {
   cost_tokens: "模型 Token", cost_search: "联网搜索", cost_fetch: "网页抓取",
   cost_ocr: "OCR", cost_asr: "ASR", cost_tts: "TTS",
 };
 const CAT_COLORS = {
-  cost_tokens: "#4f6ef7", cost_search: "#22c55e", cost_fetch: "#f59e0b",
-  cost_ocr: "#8b5cf6", cost_asr: "#ec4899", cost_tts: "#14b8a6",
+  cost_tokens: "#637bff", cost_search: "#34d399", cost_fetch: "#fbbf24",
+  cost_ocr: "#a78bfa", cost_asr: "#f472b6", cost_tts: "#22d3ee",
 };
 
 let charts = {};
@@ -62,18 +101,48 @@ async function loadSummary() {
   $("#c-total").textContent = fmtMoney(s.total_cost);
   $("#c-total-n").textContent = `${s.total_calls} 次调用`;
 
+  // 今日 vs 昨日趋势(全局口径,不受筛选影响)
+  const trend = $("#c-today-trend");
+  try {
+    const daily = await api("/api/daily?days=2");
+    const today = new Date().toISOString().slice(0, 10);
+    const yest = daily.filter((r) => r.d !== today).at(-1);
+    if (yest && Number(yest.cost_total) > 0 && s.today_calls > 0) {
+      const pct = (s.today_cost - Number(yest.cost_total)) / Number(yest.cost_total) * 100;
+      if (Math.abs(pct) < 1) {
+        trend.textContent = "· 持平较昨日";
+        trend.className = "trend";
+        trend.style.color = "var(--muted)";
+      } else {
+        trend.textContent = `${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(0)}% 较昨日`;
+        trend.className = `trend ${pct >= 0 ? "up" : "down"}`;
+        trend.style.color = "";
+      }
+    } else {
+      trend.textContent = "";
+    }
+  } catch { trend.textContent = ""; }
+
+  // 预算:细进度条 + 状态徽章
   const fill = $("#budget-fill");
+  const pill = $("#budget-pill");
   const note = $("#budget-note");
   const warn = $("#budget-warning");
   $("#budget-warning").textContent = s.budget_warning || "";
   if (s.budget > 0) {
     const pct = Math.min(100, (s.month_cost / s.budget) * 100);
+    const cls = pct >= 100 ? "r" : pct >= 80 ? "a" : "g";
+    const color = pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "var(--green)";
     fill.style.width = `${pct}%`;
-    fill.style.background = pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "var(--green)";
-    note.textContent = `本月已用 ${fmtMoney(s.month_cost)} / 预算 ${fmtMoney(s.budget)}(${pct.toFixed(1)}%)`;
+    fill.style.background = color;
+    pill.className = `pill ${cls}`;
+    pill.textContent = `${pct.toFixed(0)}%`;
+    note.innerHTML = `本月已用 <b>${fmtMoney(s.month_cost)}</b> / 预算 <b>${fmtMoney(s.budget)}</b>`;
     if (!$("#budget-input").value) $("#budget-input").value = s.budget;
   } else {
     fill.style.width = "0";
+    pill.className = "pill";
+    pill.textContent = "--";
     warn.textContent = "";
   }
 }
@@ -91,17 +160,43 @@ async function loadBalance() {
       $("#c-balance").textContent = "--";
       $("#c-balance-foot").textContent = b.reason || "未配置 Key";
     }
-  } catch (e) {
+  } catch {
     $("#c-balance-foot").textContent = "余额查询失败";
   }
 }
 
 /* ---------- 图表 ---------- */
 
+function setEmpty(id, show) {
+  $(id)?.classList.toggle("show", show);
+}
+
 function makeChart(id, cfg) {
   if (charts[id]) charts[id].destroy();
   charts[id] = new Chart($(id), cfg);
 }
+
+// 环形图中心显示总费用
+const centerTotal = {
+  id: "centerTotal",
+  afterDraw(chart) {
+    if (chart.config.type !== "doughnut" || !chart.data.datasets[0]?.data.length) return;
+    const tc = themeColors();
+    const { ctx, chartArea } = chart;
+    const x = (chartArea.left + chartArea.right) / 2;
+    const y = (chartArea.top + chartArea.bottom) / 2;
+    const total = chart.data.datasets[0].data.reduce((s, v) => s + Number(v || 0), 0);
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.fillStyle = tc.center;
+    ctx.font = "700 17px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+    ctx.fillText(fmtMoney(total), x, y - 1);
+    ctx.fillStyle = tc.tick;
+    ctx.font = "10px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+    ctx.fillText("统计期内总费用", x, y + 16);
+    ctx.restore();
+  },
+};
 
 function chartFilters() {
   const p = new URLSearchParams();
@@ -115,6 +210,119 @@ function chartFilters() {
   if (s) p.set("source", s);
   if (k) p.set("key_id", k);
   return p;
+}
+
+async function loadCharts() {
+  const p = chartFilters();
+  const tc = themeColors();
+  const tooltipStyle = {
+    backgroundColor: currentTheme() === "dark" ? "#1c212b" : "#ffffff",
+    titleColor: currentTheme() === "dark" ? "#e8eaf0" : "#1a2030",
+    bodyColor: currentTheme() === "dark" ? "#c6cbdb" : "#4b5563",
+    borderColor: currentTheme() === "dark" ? "#262c38" : "#e4e7f0",
+    borderWidth: 1,
+    padding: 10,
+  };
+
+  const daily = await api(`/api/daily?${p}`);
+  const hasDaily = daily.length > 0;
+  setEmpty("#empty-daily", !hasDaily);
+  const labels = daily.map((r) => r.d.slice(5));
+  const datasets = Object.keys(CAT_NAMES).map((k) => ({
+    label: CAT_NAMES[k],
+    data: daily.map((r) => r[k]),
+    backgroundColor: CAT_COLORS[k],
+    stack: "cost",
+    borderWidth: 0,
+    borderRadius: 3,
+    barPercentage: 0.7,
+  }));
+  datasets.push({
+    label: "合计",
+    type: "line",
+    data: daily.map((r) => r.cost_total),
+    borderColor: tc.total,
+    borderWidth: 1.2,
+    pointRadius: 0,
+    tension: 0.35,
+  });
+  makeChart("#chart-daily", {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      maintainAspectRatio: false,
+      scales: {
+        x: { stacked: true, grid: { display: false }, border: { color: tc.border },
+             ticks: { color: tc.tick, font: { size: 10 } } },
+        y: { stacked: true, beginAtZero: true,
+             grid: { color: tc.grid }, border: { display: false },
+             ticks: { color: tc.tick, font: { size: 10 }, maxTicksLimit: 6,
+                      callback: (v) => `¥${v}` } },
+      },
+      plugins: {
+        legend: { labels: { boxWidth: 8, boxHeight: 8, color: tc.legend,
+                            font: { size: 10 }, usePointStyle: true, pointStyle: "circle" } },
+        tooltip: { ...tooltipStyle,
+                   callbacks: { label: (c) => `${c.dataset.label}: ${fmtCost(c.raw)}` } },
+      },
+    },
+  });
+
+  const bd = await api(`/api/breakdown?${p}`);
+  setEmpty("#empty-breakdown", bd.length === 0);
+  makeChart("#chart-breakdown", {
+    type: "doughnut",
+    data: {
+      labels: bd.map((r) => r.category),
+      datasets: [{
+        data: bd.map((r) => r.cost),
+        backgroundColor: bd.map((r) => CAT_COLORS[r.key] || "#999"),
+        borderWidth: 2,
+        borderColor: currentTheme() === "dark" ? "#161a22" : "#ffffff",
+        hoverOffset: 6,
+      }],
+    },
+    options: {
+      maintainAspectRatio: false,
+      cutout: "68%",
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 8, boxHeight: 8,
+                   color: tc.legend, font: { size: 10 }, usePointStyle: true,
+                   pointStyle: "circle", padding: 10 } },
+        tooltip: { ...tooltipStyle,
+                   callbacks: { label: (c) => `${c.label}: ${fmtCost(c.raw)}` } },
+      },
+    },
+    plugins: [centerTotal],
+  });
+
+  const models = await api(`/api/models?${p}`);
+  setEmpty("#empty-models", models.length === 0);
+  const mGrad = models.map((_, i) => CAT_COLORS[Object.keys(CAT_NAMES)[i % 6]]);
+  makeChart("#chart-models", {
+    type: "bar",
+    data: {
+      labels: models.map((r) => r.model),
+      datasets: [{ label: "费用", data: models.map((r) => r.cost),
+                   backgroundColor: "#637bff", borderRadius: 6, barPercentage: 0.55 }],
+    },
+    options: {
+      maintainAspectRatio: false,
+      scales: {
+        x: { grid: { display: false }, border: { color: tc.border },
+             ticks: { color: tc.tick, font: { size: 10 } } },
+        y: { beginAtZero: true, grid: { color: tc.grid }, border: { display: false },
+             ticks: { color: tc.tick, font: { size: 10 }, maxTicksLimit: 6,
+                      callback: (v) => `¥${v}` } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: { ...tooltipStyle,
+                   callbacks: { label: (c) => `${fmtCost(c.raw)}(${models[c.dataIndex].calls} 次)` } },
+      },
+    },
+  });
+  void mGrad; // 预留:按模型着色
 }
 
 /* ---------- Key 分组 ---------- */
@@ -135,17 +343,16 @@ function renderKeys() {
     const pct = total > 0 ? `${(Number(k.cost) / total * 100).toFixed(1)}%` : "-";
     tr.innerHTML = `
       <td>${k.name || "(未带 Key)"}</td>
-      <td class="hint">${k.masked || "-"}</td>
-      <td><input type="text" value="${(k.label || "").replace(/"/g, "&quot;")}"
-           placeholder="自定义标签" data-key-id="${k.key_id}"
-           style="width:110px;padding:4px 7px;border:1px solid var(--border);border-radius:6px;font-size:12.5px"></td>
-      <td>${k.calls}</td>
-      <td class="cost">${fmtCost(k.cost)}</td>
-      <td>${pct}</td>`;
+      <td class="hint" style="margin:0">${k.masked || "-"}</td>
+      <td><input type="text" class="keys-input" value="${(k.label || "").replace(/"/g, "&quot;")}"
+           placeholder="自定义标签" data-key-id="${k.key_id}"></td>
+      <td class="r num">${k.calls}</td>
+      <td class="r num cost">${fmtCost(k.cost)}</td>
+      <td class="r num">${pct}</td>`;
     body.appendChild(tr);
   }
   if (!keysCache.length) {
-    body.innerHTML = `<tr><td colspan="6" class="hint">暂无数据</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="hint" style="text-align:center">暂无数据</td></tr>`;
   }
   body.querySelectorAll("input[data-key-id]").forEach((inp) => {
     inp.addEventListener("change", async () => {
@@ -166,84 +373,6 @@ function renderKeyOptions() {
   }
   sel.innerHTML = opts.join("");
   if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
-}
-
-async function loadCharts() {
-  const p = chartFilters();
-
-  const daily = await api(`/api/daily?${p}`);
-  const labels = daily.map((r) => r.d.slice(5));
-  const datasets = Object.keys(CAT_NAMES).map((k) => ({
-    label: CAT_NAMES[k],
-    data: daily.map((r) => r[k]),
-    backgroundColor: CAT_COLORS[k],
-    stack: "cost",
-    borderWidth: 0,
-  }));
-  datasets.push({
-    label: "合计",
-    type: "line",
-    data: daily.map((r) => r.cost_total),
-    borderColor: "#1f2430",
-    backgroundColor: "#1f2430",
-    borderWidth: 1.5,
-    pointRadius: 2,
-    tension: 0.3,
-  });
-  makeChart("#chart-daily", {
-    type: "bar",
-    data: { labels, datasets },
-    options: {
-      maintainAspectRatio: false,
-      scales: {
-        x: { stacked: true, grid: { display: false } },
-        y: { stacked: true, ticks: { callback: (v) => `¥${v}` } },
-      },
-      plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 } } } },
-    },
-  });
-
-  const bd = await api(`/api/breakdown?${p}`);
-  makeChart("#chart-breakdown", {
-    type: "doughnut",
-    data: {
-      labels: bd.map((r) => r.category),
-      datasets: [{
-        data: bd.map((r) => r.cost),
-        backgroundColor: bd.map((r) => CAT_COLORS[r.key] || "#999"),
-        borderWidth: 2, borderColor: "#fff",
-      }],
-    },
-    options: {
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { position: "bottom", labels: { boxWidth: 10, font: { size: 10 } } },
-        tooltip: { callbacks: { label: (c) => `${c.label}: ${fmtCost(c.raw)}` } },
-      },
-    },
-  });
-
-  const models = await api(`/api/models?${p}`);
-  makeChart("#chart-models", {
-    type: "bar",
-    data: {
-      labels: models.map((r) => r.model),
-      datasets: [{
-        label: "费用",
-        data: models.map((r) => r.cost),
-        backgroundColor: "#4f6ef7",
-        borderRadius: 6,
-      }],
-    },
-    options: {
-      maintainAspectRatio: false,
-      scales: { y: { ticks: { callback: (v) => `¥${v}` } } },
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: (c) => `${fmtCost(c.raw)}(${models[c.dataIndex].calls} 次)` } },
-      },
-    },
-  });
 }
 
 /* ---------- 调用日志 ---------- */
@@ -267,26 +396,34 @@ async function loadCalls() {
     if (r.ocr_pages) others.push(`${fmtN(r.ocr_pages)} 页`);
     if (r.asr_seconds) others.push(`${Math.round(r.asr_seconds)}s 音频`);
     if (r.tts_chars) others.push(`${fmtN(r.tts_chars)} 字`);
-    const detail = [
-      `token ${fmtCost(r.cost_tokens)}`, `搜索 ${fmtCost(r.cost_search)}`,
-      `抓取 ${fmtCost(r.cost_fetch)}`, `OCR ${fmtCost(r.cost_ocr)}`,
-      `ASR ${fmtCost(r.cost_asr)}`, `TTS ${fmtCost(r.cost_tts)}`,
-    ].join(" · ");
-    const status = r.error
+    // 只显示非零费用项,消除 ¥0 噪音
+    const parts = [];
+    if (r.cost_tokens) parts.push(`token ${fmtCost(r.cost_tokens)}`);
+    if (r.cost_search) parts.push(`搜索 ${fmtCost(r.cost_search)}`);
+    if (r.cost_fetch) parts.push(`抓取 ${fmtCost(r.cost_fetch)}`);
+    if (r.cost_ocr) parts.push(`OCR ${fmtCost(r.cost_ocr)}`);
+    if (r.cost_asr) parts.push(`ASR ${fmtCost(r.cost_asr)}`);
+    if (r.cost_tts) parts.push(`TTS ${fmtCost(r.cost_tts)}`);
+    const detail = parts.length ? parts.join(" · ")
+                                : `<span class="zero">–</span>`;
+    const detailFull = ["token", "搜索", "抓取", "OCR", "ASR", "TTS"].join(" · ");
+    const errBadge = r.error
       ? `<span class="badge err" title="${String(r.error).replace(/"/g, "&quot;")}">${r.status_code}</span>`
-      : `<span class="badge">${r.stream ? "流式" : "完成"}</span>`;
-    const src = r.source === "demo" ? `<span class="badge">演示</span> ` : "";
+      : "";
+    const streamBadge = r.stream
+      ? `<span class="badge stream">流式</span>` : `<span class="badge ok">完成</span>`;
+    const src = r.source === "demo" ? `<span class="badge demo">演示</span> ` : "";
     tr.innerHTML = `
       <td>${r.ts}</td>
-      <td class="endpoint-cell" title="${r.protocol}">${r.endpoint}</td>
+      <td title="${r.protocol}">${r.endpoint}</td>
       <td>${r.model || "-"}</td>
       <td>${keyName}</td>
-      <td>${tokens}</td>
-      <td>${tools}</td>
-      <td>${others.join(" · ") || "-"}</td>
-      <td class="hint" style="white-space:normal" title="${detail}">${detail}</td>
-      <td class="cost">${fmtCost(r.cost_total)}</td>
-      <td>${src}${status}${r.latency_ms ? ` <span class="hint">${r.latency_ms}ms</span>` : ""}</td>`;
+      <td class="r num">${tokens}</td>
+      <td class="r num">${tools}</td>
+      <td>${others.join(" · ") || `<span class="zero">–</span>`}</td>
+      <td title="${detailFull}">${detail}</td>
+      <td class="r num cost">${fmtCost(r.cost_total)}</td>
+      <td>${src}${errBadge || streamBadge}${r.latency_ms ? ` <span class="zero">${r.latency_ms}ms</span>` : ""}</td>`;
     body.appendChild(tr);
   }
 
@@ -427,7 +564,8 @@ $("#webhook-save").addEventListener("click", saveWebhook);
 $("#webhook-test").addEventListener("click", testWebhook);
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadCharts(), loadKeys(), loadCalls()]);
+  await loadKeys(); // 日志表的 Key 列依赖 keysCache,需先加载
+  await Promise.all([loadSummary(), loadCharts(), loadCalls()]);
 }
 
 setInterval(() => {
