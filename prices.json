@@ -1,0 +1,45 @@
+{
+  "_说明": "价格单位:模型 token 为 元/百万tokens;工具为 元/千次;OCR 为 元/千页;ASR 为 元/小时;TTS 为 元/万字符。与 api-docs.deepseek.com 官方刊例价对齐,可在面板中修改,保存后立即生效。",
+  "currency": "CNY",
+  "models": {
+    "deepseek-flash": {
+      "alias": ["deepseek-chat", "deepseek-v4.1-flash"],
+      "input_cache_hit": { "peak": 0.04, "off_peak": 0.02 },
+      "input_cache_miss": { "peak": 2.0, "off_peak": 1.0 },
+      "output": { "peak": 8.0, "off_peak": 4.0 }
+    },
+    "deepseek-v4-pro": {
+      "alias": ["deepseek-reasoner", "deepseek-v4-pro-1017"],
+      "input_cache_hit": { "peak": 0.3, "off_peak": 0.15 },
+      "input_cache_miss": { "peak": 9.0, "off_peak": 4.5 },
+      "output": { "peak": 27.0, "off_peak": 13.5 }
+    }
+  },
+  "default_model": "deepseek-flash",
+  "tools_per_1k": {
+    "web_search_requests": 5.0,
+    "tool_search": 5.0,
+    "tool_image_search": 5.0,
+    "web_fetch_requests": 5.0,
+    "tool_fetch": 5.0
+  },
+  "standalone": {
+    "ocr": {
+      "price_per_1k_pages": 1.5,
+      "page_fields": ["pages", "page_count", "num_pages"]
+    },
+    "asr": {
+      "price_per_hour": 0.78,
+      "discount_price_per_hour": 0.39,
+      "duration_fields": ["duration", "duration_seconds", "audio_seconds"]
+    },
+    "tts": {
+      "price_per_10k_chars": 3.0,
+      "discount_price_per_10k_chars": 1.5,
+      "char_fields": ["chars", "characters", "char_count", "text_length"]
+    }
+  },
+  "use_discount": true,
+  "peak_hours": [[9, 12], [14, 18]],
+  "peak_weekdays_only": true
+}

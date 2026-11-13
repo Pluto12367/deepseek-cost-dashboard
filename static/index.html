@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek 成本监控面板</title>
+<script src="/static/vendor/chart.umd.min.js"
+        onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'"></script>
+<style>
+  :root {
+    --bg: #f2f4fa; --panel: #ffffff; --text: #1f2430; --muted: #6b7280;
+    --accent: #4f6ef7; --border: #e5e8f0;
+    --green: #22c55e; --amber: #f59e0b; --red: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 20px 28px 6px; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+  header .meta { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+  main { padding: 14px 28px 30px; display: flex; flex-direction: column; gap: 16px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border-radius: 14px; padding: 16px 18px;
+          box-shadow: 0 1px 4px rgba(31,36,48,.06); }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; letter-spacing: .3px; }
+  .card .foot { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+  .panel { background: var(--panel); border-radius: 14px; padding: 16px 18px;
+           box-shadow: 0 1px 4px rgba(31,36,48,.06); }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center;
+                flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .panel-head h2 { margin: 0; }
+
+  .budget { display: flex; flex-direction: column; gap: 8px; }
+  .budget-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+  .budget-head input { width: 130px; padding: 5px 8px; border: 1px solid var(--border);
+                       border-radius: 8px; font-size: 13px; }
+  .budget-head .warn { color: var(--red); font-weight: 600; }
+  .bar { height: 10px; background: #edf0f7; border-radius: 999px; overflow: hidden; }
+  .bar .fill { height: 100%; width: 0; background: var(--green); border-radius: 999px;
+               transition: width .4s; }
+  .bar-note { color: var(--muted); font-size: 12px; }
+
+  .charts { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; }
+  @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
+  .chart-box { position: relative; height: 260px; }
+
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filters select, .filters input { padding: 6px 9px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 13px; background: #fff; }
+  button, .btn { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.ghost { background: #eef1f8; color: var(--text); }
+
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px;
+       border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 7px 10px; border-bottom: 1px solid #f0f2f8; white-space: nowrap; }
+  tr.err td { background: #fef2f2; }
+  tr.err .endpoint-cell { color: var(--red); }
+  .cost { font-weight: 700; }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 999px;
+           background: #eef1f8; color: var(--muted); }
+  .badge.err { background: #fee2e2; color: var(--red); }
+  .pager { display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+           margin-top: 10px; font-size: 12px; color: var(--muted); }
+
+  details.panel summary { cursor: pointer; }
+  details.panel summary h2 { display: inline; }
+  .price-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 14px; margin-top: 12px; }
+  .price-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .price-card h3 { margin: 0 0 8px; font-size: 13px; }
+  .price-card .row { display: flex; justify-content: space-between; align-items: center;
+                     font-size: 12.5px; padding: 3px 0; gap: 8px; }
+  .price-card .row span:first-child { color: var(--muted); }
+  .price-card input { width: 100px; padding: 4px 7px; border: 1px solid var(--border);
+                      border-radius: 6px; font-size: 12.5px; text-align: right; }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0 10px; }
+  footer { color: var(--muted); font-size: 11.5px; padding: 0 28px 26px; line-height: 1.7; }
+  #msg { font-size: 12px; color: var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>DeepSeek 成本监控面板</h1>
+    <p class="sub">本地代理记账 · 精确到每次调用 · 数据不出本机</p>
+  </div>
+  <div class="meta">
+    <span id="clock"></span>
+    <button class="ghost" id="refresh">刷新</button>
+  </div>
+</header>
+
+<main>
+  <section class="cards">
+    <div class="card"><div class="label">今日花费</div><div class="value" id="c-today">--</div><div class="foot" id="c-today-n"></div></div>
+    <div class="card"><div class="label">本月花费</div><div class="value" id="c-month">--</div><div class="foot" id="c-month-n"></div></div>
+    <div class="card"><div class="label">累计花费</div><div class="value" id="c-total">--</div><div class="foot" id="c-total-n"></div></div>
+    <div class="card"><div class="label">账户余额</div><div class="value" id="c-balance">--</div><div class="foot" id="c-balance-foot">未配置 Key</div></div>
+  </section>
+
+  <section class="panel budget">
+    <div class="budget-head">
+      <b>月预算</b>
+      <input id="budget-input" type="number" min="0" step="0.5" placeholder="预算(元)">
+      <button id="budget-save">保存</button>
+      <span id="budget-warning" class="warn"></span>
+      <span id="msg"></span>
+    </div>
+    <div class="bar"><div id="budget-fill" class="fill"></div></div>
+    <div class="bar-note" id="budget-note">未设置预算。设置后,月花费达到 80% 预警、100% 告警(代理响应头 X-DSCD-Budget-Warning 同步提示)。</div>
+  </section>
+
+  <section class="charts">
+    <div class="panel"><h2>每日花费(按类别堆叠,折线为合计)</h2><div class="chart-box"><canvas id="chart-daily"></canvas></div></div>
+    <div class="panel"><h2>费用构成</h2><div class="chart-box"><canvas id="chart-breakdown"></canvas></div></div>
+    <div class="panel"><h2>模型花费对比</h2><div class="chart-box"><canvas id="chart-models"></canvas></div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>调用日志</h2>
+      <div class="filters">
+        <select id="f-days">
+          <option value="1">今天</option>
+          <option value="7" selected>近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="0">全部</option>
+        </select>
+        <input id="f-model" placeholder="模型筛选" style="width:130px">
+        <input id="f-endpoint" placeholder="端点筛选" style="width:150px">
+        <select id="f-source">
+          <option value="">全部来源</option>
+          <option value="real">真实调用</option>
+          <option value="demo">演示数据</option>
+        </select>
+        <button id="f-apply">查询</button>
+        <a class="btn" id="export-btn" href="/api/calls/export.csv?days=7">导出 CSV</a>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>时间</th><th>端点</th><th>模型</th><th>Tokens(命中/未命中/输出)</th>
+          <th>工具(搜/图/抓)</th><th>其他量</th><th>费用明细</th><th>合计</th><th>状态</th>
+        </tr></thead>
+        <tbody id="calls-body"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button class="ghost" id="prev">上一页</button>
+      <span id="page-info"></span>
+      <button class="ghost" id="next">下一页</button>
+    </div>
+  </section>
+
+  <details class="panel">
+    <summary><h2>价格表编辑(保存后立即生效)</h2></summary>
+    <p class="hint">单位:模型 token 为 元/百万 tokens;工具为 元/千次;OCR 元/千页;ASR 元/小时;TTS 元/万字符。写入 prices.json。</p>
+    <div id="prices-editor"></div>
+    <div style="margin-top:12px">
+      <label style="font-size:13px"><input type="checkbox" id="p-discount"> 启用 ASR/TTS 限时折扣价</label>
+      <button id="prices-save">保存价格表</button>
+    </div>
+  </details>
+
+  <details class="panel">
+    <summary><h2>设置(API Key 仅用于查询余额)</h2></summary>
+    <p class="hint">Key 只保存在本机 data.db,用于轮询官方 /user/balance;面板不产生任何调用费用。</p>
+    <input id="api-key" type="password" placeholder="sk-..." style="width:320px;padding:7px 9px;border:1px solid var(--border);border-radius:8px">
+    <button id="key-save">保存 Key</button>
+    <span class="hint" id="key-masked"></span>
+  </details>
+</main>
+
+<footer>
+  估算口径:官方刊例价 × 每次调用返回的 usage 计数,仅供监控参考,以官方账单为准。
+  高峰时段 = 北京时间周一至周五 9:00–12:00、14:00–18:00。流式请求若未开启 stream_options.include_usage,token 用量可能无法统计(工具次数仍可统计)。
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
