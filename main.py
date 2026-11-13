@@ -9,8 +9,9 @@ from __future__ import annotations
 import csv
 import io
 import os
+import calendar
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import FastAPI, Request
@@ -29,6 +30,11 @@ STATIC_DIR = os.path.join(_DIR, "static")
 @asynccontextmanager
 async def lifespan(_app):
     db.init_db()
+    retention = db.get_setting("retention_days")
+    if retention and int(retention) > 0:  # 数据保留策略:启动时清理过期记录
+        removed = db.cleanup(int(retention))
+        if removed:
+            print(f"[数据保留] 已清理 {removed} 条 {retention} 天前的记录")
     yield
 
 
@@ -67,42 +73,54 @@ def api_summary():
         elif s["month_cost"] >= budget * 0.8:
             warn = (f"本月已花费 ¥{s['month_cost']:.2f},"
                     f"已用预算的 {s['month_cost'] / budget * 100:.0f}%")
-    return {**s, "budget": budget, "budget_progress": progress, "budget_warning": warn}
+
+    # 月底费用预测:近 7 天日均 × 剩余天数
+    now = datetime.now()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    days_remaining = days_in_month - now.day
+    avg7 = db.range_spend((now - timedelta(days=6)).strftime("%Y-%m-%d")) / 7
+    forecast = s["month_cost"] + avg7 * days_remaining
+
+    return {**s, "budget": budget, "budget_progress": progress, "budget_warning": warn,
+            "days_remaining": days_remaining, "forecast_daily_avg": round(avg7, 4),
+            "forecast_month": round(forecast, 2)}
 
 
-def _filters(days: int, model: str, endpoint: str, source: str, key_id: str = "") -> dict:
+def _filters(days: int, model: str, endpoint: str, source: str, key_id: str = "",
+             date: str = "") -> dict:
     d = max(1, min(int(days), 365)) if int(days) else None
     return {"days": d, "model": model or None,
             "endpoint": endpoint or None, "source": source or None,
-            "key_id": key_id or None}
+            "key_id": key_id or None, "date": date or None}
 
 
 @app.get("/api/daily")
 def api_daily(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
-              key_id: str = ""):
-    return db.daily_series(**_filters(days, model, endpoint, source, key_id))
+              key_id: str = "", date: str = ""):
+    return db.daily_series(**_filters(days, model, endpoint, source, key_id, date))
 
 
 @app.get("/api/breakdown")
 def api_breakdown(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
-                  key_id: str = ""):
+                  key_id: str = "", date: str = ""):
     names = {"cost_tokens": "模型 Token", "cost_search": "联网搜索",
              "cost_fetch": "网页抓取", "cost_ocr": "OCR",
              "cost_asr": "ASR", "cost_tts": "TTS"}
-    rows = db.breakdown(**_filters(days, model, endpoint, source, key_id))
+    rows = db.breakdown(**_filters(days, model, endpoint, source, key_id, date))
     return [{"category": names[r["k"]], "key": r["k"], "cost": r["v"]}
             for r in rows if r["v"] > 0]
 
 
 @app.get("/api/models")
 def api_models(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
-               key_id: str = ""):
-    return db.by_model(**_filters(days, model, endpoint, source, key_id))
+               key_id: str = "", date: str = ""):
+    return db.by_model(**_filters(days, model, endpoint, source, key_id, date))
 
 
 @app.get("/api/keys")
-def api_keys(days: int = 30, model: str = "", endpoint: str = "", source: str = ""):
-    return db.by_key(**_filters(days, model, endpoint, source))
+def api_keys(days: int = 30, model: str = "", endpoint: str = "", source: str = "",
+             date: str = ""):
+    return db.by_key(**_filters(days, model, endpoint, source, "", date))
 
 
 @app.post("/api/keys/label")
@@ -117,8 +135,8 @@ async def api_keys_label(request: Request):
 
 @app.get("/api/calls")
 def api_calls(days: int = 7, model: str = "", endpoint: str = "", source: str = "",
-              key_id: str = "", limit: int = 20, offset: int = 0):
-    f = _filters(days, model, endpoint, source, key_id)
+              key_id: str = "", date: str = "", limit: int = 20, offset: int = 0):
+    f = _filters(days, model, endpoint, source, key_id, date)
     return {"rows": db.list_calls(limit=min(max(limit, 1), 200),
                                   offset=max(offset, 0), **f),
             "total": db.count_calls(**f)}
@@ -126,8 +144,8 @@ def api_calls(days: int = 7, model: str = "", endpoint: str = "", source: str = 
 
 @app.get("/api/calls/export.csv")
 def api_calls_csv(days: int = 7, model: str = "", endpoint: str = "", source: str = "",
-                  key_id: str = ""):
-    rows = db.export_rows(**_filters(days, model, endpoint, source, key_id))
+                  key_id: str = "", date: str = ""):
+    rows = db.export_rows(**_filters(days, model, endpoint, source, key_id, date))
     buf = io.StringIO()
     buf.write("\ufeff")  # BOM:Excel 打开中文不乱码
     if rows:
@@ -144,11 +162,16 @@ def api_settings():
     key = db.get_setting("api_key") or ""
     masked = f"sk-***{key[-4:]}" if len(key) >= 8 else ("已设置" if key else "")
     raw = db.get_setting("monthly_budget")
+    thr = db.get_setting("cost_alert_threshold")
+    ret = db.get_setting("retention_days")
     return {"monthly_budget": float(raw) if raw else None,
             "has_key": bool(key), "api_key_masked": masked,
             "inject_usage": db.get_setting("inject_usage") != "0",  # 默认开启
             "webhook_url": db.get_setting("webhook_url") or "",
-            "webhook_last_result": db.get_setting("webhook_last_result") or ""}
+            "webhook_type": db.get_setting("webhook_type") or "generic",
+            "webhook_last_result": db.get_setting("webhook_last_result") or "",
+            "cost_alert_threshold": float(thr) if thr else 0.5,
+            "retention_days": int(ret) if ret else 90}
 
 
 @app.post("/api/settings")
@@ -174,6 +197,14 @@ async def api_settings_post(request: Request):
             db.set_setting("webhook_url", v)
         else:
             db.delete_setting("webhook_url")
+    if "webhook_type" in body:
+        db.set_setting("webhook_type", body["webhook_type"] or "generic")
+    if "cost_alert_threshold" in body:
+        v = body["cost_alert_threshold"]
+        db.set_setting("cost_alert_threshold", str(float(v)) if v and float(v) > 0 else "0.5")
+    if "retention_days" in body:
+        v = body["retention_days"]
+        db.set_setting("retention_days", str(int(v)) if v and int(v) > 0 else "90")
     return {"ok": True}
 
 
@@ -181,6 +212,29 @@ async def api_settings_post(request: Request):
 async def api_webhook_test():
     result = await notify.send_test()
     return result
+
+
+@app.post("/api/demo/seed")
+def api_demo_seed():
+    """无 Key 时的演示模式:一键生成 30 天模拟数据(def 端点自动在线程池执行)。"""
+    import demo_seed
+    demo_seed.main()
+    return {"ok": True}
+
+
+@app.post("/api/demo/wipe")
+def api_demo_wipe():
+    import demo_seed
+    demo_seed.main(wipe=True)
+    return {"ok": True}
+
+
+@app.post("/api/cleanup")
+def api_cleanup():
+    ret = db.get_setting("retention_days")
+    days = int(ret) if ret and int(ret) > 0 else 90
+    removed = db.cleanup(days)
+    return {"ok": True, "removed": removed, "days": days}
 
 
 @app.get("/api/prices")
@@ -231,8 +285,13 @@ async def passthrough(path: str, request: Request):
 
 
 if __name__ == "__main__":
+    import threading
+    import webbrowser
+
     import uvicorn
 
     print("面板:      http://127.0.0.1:8787/ui")
     print("代理地址:   http://127.0.0.1:8787  (base_url 指向这里即可记账)")
+    if os.environ.get("DSCD_NO_BROWSER") != "1":  # 启动后自动打开面板
+        threading.Timer(1.5, webbrowser.open, ["http://127.0.0.1:8787/ui"]).start()
     uvicorn.run(app, host="127.0.0.1", port=8787)

@@ -108,9 +108,12 @@ def get_key(key_id: str) -> dict | None:
 
 # ---------- 过滤条件(列统一带 calls. 前缀,兼容 JOIN keys 的查询) ----------
 
-def _filter_sql(days=None, model=None, endpoint=None, source=None, key_id=None):
+def _filter_sql(days=None, model=None, endpoint=None, source=None, key_id=None, date=None):
     conds, params = [], []
-    if days:
+    if date:  # 精确到某天(下钻用),优先于 days
+        conds.append("substr(calls.ts,1,10) = ?")
+        params.append(date)
+    elif days:
         cutoff = (datetime.now() - timedelta(days=int(days) - 1)).strftime("%Y-%m-%d")
         conds.append("calls.ts >= ?")
         params.append(cutoff)
@@ -152,6 +155,22 @@ def month_spend() -> float:
         r = c.execute("SELECT COALESCE(SUM(cost_total),0) s FROM calls WHERE ts LIKE ?",
                       (month + "%",)).fetchone()
     return r["s"]
+
+
+def range_spend(start_date: str) -> float:
+    """某日期(含)以来的总花费,供预测用。"""
+    with _conn() as c:
+        r = c.execute("SELECT COALESCE(SUM(cost_total),0) s FROM calls WHERE ts >= ?",
+                      (start_date,)).fetchone()
+    return r["s"]
+
+
+def cleanup(days: int) -> int:
+    """删除 N 天前的调用记录(数据保留策略),返回删除条数。"""
+    cutoff = (datetime.now() - timedelta(days=int(days))).strftime("%Y-%m-%d")
+    with _conn() as c:
+        r = c.execute("DELETE FROM calls WHERE substr(ts,1,10) < ?", (cutoff,))
+    return r.rowcount
 
 
 def daily_series(days=30, **f) -> list[dict]:

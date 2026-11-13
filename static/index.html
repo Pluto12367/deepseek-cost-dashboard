@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DeepSeek 成本监控面板</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23637bff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='13' fill='url(%23g)'/%3E%3C/svg%3E">
 <script src="/static/vendor/chart.umd.min.js"
         onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js'"></script>
 <style>
@@ -174,6 +175,31 @@
   code { background: var(--panel-2); border-radius: 5px; padding: 1px 6px;
          font-size: 11.5px; font-family: Consolas, Menlo, monospace; }
 
+  .linkish { color: var(--accent); cursor: pointer;
+             text-decoration: underline dotted rgba(99, 123, 255, .6);
+             text-underline-offset: 3px; }
+  .linkish:hover { text-decoration-style: solid; }
+  @keyframes rowfresh { from { background: rgba(99, 123, 255, .25); }
+                        to { background: transparent; } }
+  tr.fresh { animation: rowfresh 2.4s ease-out; }
+  tr.err-detail td { background: var(--panel-2); white-space: normal; }
+  tr.err-detail pre { margin: 6px 0; white-space: pre-wrap; word-break: break-all;
+                      font-size: 11.5px; color: var(--red);
+                      font-family: Consolas, Menlo, monospace; }
+  .cost.high { color: var(--red); }
+  .steps { margin: 8px 0 4px; padding-left: 20px; color: var(--muted);
+           font-size: 13px; line-height: 2; }
+  .steps code { margin: 0 2px; }
+  .snip { position: relative; border: 1px solid var(--border); border-radius: 10px;
+          background: var(--panel-2); margin-top: 10px; }
+  .snip h3 { margin: 0; padding: 8px 12px; font-size: 12.5px; color: var(--muted);
+             display: flex; justify-content: space-between; align-items: center;
+             border-bottom: 1px solid var(--border); }
+  .snip pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-size: 12px;
+              line-height: 1.6; color: var(--text);
+              font-family: Consolas, Menlo, "Cascadia Code", monospace; }
+  .copy-btn { font-size: 11px; padding: 3px 10px; }
+
   footer { color: var(--faint); font-size: 11.5px; padding: 4px 28px 26px; line-height: 1.8; }
   ::selection { background: rgba(99, 123, 255, .35); }
 </style>
@@ -189,6 +215,11 @@
     <p class="sub">本地代理记账 · 精确到每次调用 · 数据不出本机</p>
   </div>
   <div class="meta">
+    <select id="auto-refresh" title="自动刷新">
+      <option value="0">刷新: 关</option>
+      <option value="5">每 5 秒</option>
+      <option value="30" selected>每 30 秒</option>
+    </select>
     <button class="ghost" id="theme-toggle" title="切换深浅主题">🌙 深色</button>
     <span id="clock"></span>
     <button class="ghost" id="refresh">刷新</button>
@@ -196,6 +227,19 @@
 </header>
 
 <main>
+  <section class="panel" id="onboard" hidden>
+    <h2>👋 三步开始使用</h2>
+    <ol class="steps">
+      <li>把你的应用 base_url 指向 <code>http://127.0.0.1:8787</code>,API Key 照常传 —— 下面「接入你的应用」有一键复制代码</li>
+      <li>在应用里正常发一条消息(带联网搜索也没问题)</li>
+      <li>回到本页,费用明细会自动出现;想先看效果可点下方按钮</li>
+    </ol>
+    <div style="display:flex;gap:10px">
+      <button id="demo-seed">先生成 30 天演示数据看看效果</button>
+      <button class="ghost" id="demo-wipe">清除演示数据</button>
+    </div>
+  </section>
+
   <section class="cards">
     <div class="card hero"><div class="label">今日花费</div><div class="value num" id="c-today">--</div><div class="foot"><span id="c-today-n"></span><span class="trend" id="c-today-trend"></span></div></div>
     <div class="card"><div class="label">本月花费</div><div class="value num" id="c-month">--</div><div class="foot" id="c-month-n"></div></div>
@@ -216,6 +260,7 @@
       <span class="pill" id="budget-pill">--</span>
     </div>
     <div class="bar-note" id="budget-note">未设置预算。设置后,月花费达 80% 预警、100% 告警(代理响应头 X-DSCD-Budget-Warning 同步提示)。</div>
+    <div class="bar-note" id="forecast-note" style="color:var(--muted)"></div>
   </section>
 
   <section class="charts">
@@ -238,6 +283,44 @@
       </div>
     </div>
   </section>
+
+  <details class="panel" id="integrate">
+    <summary><h2>接入你的应用(点开复制代码)</h2></summary>
+    <p class="hint">把 base_url 指向本代理即可自动记账;API Key 原样透传,面板零改动。</p>
+    <div class="snip">
+      <h3><span>Python(openai SDK)</span><button class="ghost copy-btn" data-copy="snip-py">复制</button></h3>
+      <pre id="snip-py">from openai import OpenAI
+
+client = OpenAI(
+    api_key="sk-...",                  # 你的 DeepSeek API Key(透传)
+    base_url="http://127.0.0.1:8787",  # 指向本地代理,自动记账
+)
+resp = client.chat.completions.create(
+    model="deepseek-flash",
+    messages=[{"role": "user", "content": "你好"}],
+)</pre>
+    </div>
+    <div class="snip">
+      <h3><span>Node.js(openai SDK)</span><button class="ghost copy-btn" data-copy="snip-node">复制</button></h3>
+      <pre id="snip-node">import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: "sk-...",
+  baseURL: "http://127.0.0.1:8787",
+});
+const res = await client.chat.completions.create({
+  model: "deepseek-flash",
+  messages: [{ role: "user", content: "你好" }],
+});</pre>
+    </div>
+    <div class="snip">
+      <h3><span>curl</span><button class="ghost copy-btn" data-copy="snip-curl">复制</button></h3>
+      <pre id="snip-curl">curl http://127.0.0.1:8787/chat/completions \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"你好"}]}'</pre>
+    </div>
+  </details>
 
   <section class="panel">
     <div class="panel-head">
@@ -268,6 +351,7 @@
         </select>
         <input id="f-model" placeholder="模型筛选" style="width:130px">
         <input id="f-endpoint" placeholder="端点筛选" style="width:150px">
+        <input id="f-date" type="date" title="精确到某天(点击图表柱子也会填入)" style="width:145px">
         <select id="f-key"></select>
         <select id="f-source">
           <option value="">全部来源</option>
@@ -318,10 +402,26 @@
       </label>
     </div>
     <div style="margin-top:14px">
+      <b style="font-size:13px">监控偏好</b>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;font-size:13px;align-items:center">
+        <label>单笔费用超 <input id="cost-threshold" type="number" step="0.1" min="0" class="num" style="width:80px;padding:4px 7px;border-radius:6px"> 元标红</label>
+        <label>数据保留 <input id="retention-days" type="number" step="1" min="1" class="num" style="width:70px;padding:4px 7px;border-radius:6px"> 天</label>
+        <button class="ghost" id="cleanup-now">立即清理过期数据</button>
+        <label><input type="checkbox" id="notify-desktop"> 超预算时浏览器桌面通知</label>
+        <span id="cleanup-msg" class="hint" style="margin:0"></span>
+      </div>
+    </div>
+    <div style="margin-top:14px">
       <b style="font-size:13px">Webhook 预算告警</b>
-      <span class="hint">月花费达 80% 推送 budget_warning、100% 推送 budget_exceeded(每级别每月一次);POST JSON 到下方 URL</span>
+      <span class="hint">月花费达 80% 推送 budget_warning、100% 推送 budget_exceeded(每级别每月一次);支持钉钉/飞书/企业微信机器人格式</span>
       <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
-        <input id="webhook-url" type="url" placeholder="https://example.com/hook" style="width:340px;padding:7px 9px;border-radius:8px">
+        <select id="webhook-type" style="padding:7px 9px;border-radius:8px">
+          <option value="generic">通用 JSON</option>
+          <option value="dingtalk">钉钉机器人</option>
+          <option value="feishu">飞书机器人</option>
+          <option value="wecom">企业微信机器人</option>
+        </select>
+        <input id="webhook-url" type="url" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." style="width:320px;padding:7px 9px;border-radius:8px">
         <button id="webhook-save">保存 URL</button>
         <button class="ghost" id="webhook-test">发送测试</button>
         <span class="hint" id="webhook-last"></span>

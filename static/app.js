@@ -54,6 +54,10 @@ let pricesData = null;
 let keysCache = []; // [{key_id, name, masked, label, calls, cost}]
 let page = 0;
 const PAGE_SIZE = 20;
+let dailyDates = [];        // 每日图表对应完整日期,供柱子下钻
+let lastSeenMaxId = null;   // 新调用行闪烁
+let lastWarnText = "";      // 桌面通知去重
+let thresholdCache = 0.5;   // 单笔高价标红阈值
 
 const fmtMoney = (n, d = 2) => `¥${Number(n || 0).toFixed(d)}`;
 const fmtCost = (n) => {
@@ -101,6 +105,23 @@ async function loadSummary() {
   $("#c-total").textContent = fmtMoney(s.total_cost);
   $("#c-total-n").textContent = `${s.total_calls} 次调用`;
 
+  // 浏览器标签页常显今日花费
+  document.title = `¥${Number(s.today_cost).toFixed(2)} 今日 · 成本面板`;
+
+  // 首跑引导:还没有任何调用时展示
+  $("#onboard").hidden = s.total_calls !== 0;
+
+  // 超预算桌面通知(内容变化才发,避免打扰)
+  if (s.budget_warning && s.budget_warning !== lastWarnText) {
+    lastWarnText = s.budget_warning;
+    if (localStorage.getItem("dscd-notify") === "1" &&
+        typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification("DeepSeek 成本告警", { body: s.budget_warning });
+    }
+  } else if (!s.budget_warning) {
+    lastWarnText = "";
+  }
+
   // 今日 vs 昨日趋势(全局口径,不受筛选影响)
   const trend = $("#c-today-trend");
   try {
@@ -144,6 +165,19 @@ async function loadSummary() {
     pill.className = "pill";
     pill.textContent = "--";
     warn.textContent = "";
+  }
+
+  // 月底费用预测
+  const fnote = $("#forecast-note");
+  if (s.total_calls > 0 && s.forecast_daily_avg > 0) {
+    const over = s.budget > 0 && s.forecast_month > s.budget;
+    fnote.innerHTML =
+      `按近 7 天日均 <b>${fmtMoney(s.forecast_daily_avg)}</b> 推算,` +
+      `月底预计 <b style="color:${over ? "var(--red)" : "inherit"}">¥${Number(s.forecast_month).toFixed(2)}</b>` +
+      (s.budget > 0 ? `(预算 ${fmtMoney(s.budget)} 的 ${(s.forecast_month / s.budget * 100).toFixed(0)}%)` : "") +
+      ` · 距月底 ${s.days_remaining} 天`;
+  } else {
+    fnote.innerHTML = "";
   }
 }
 
@@ -200,11 +234,16 @@ const centerTotal = {
 
 function chartFilters() {
   const p = new URLSearchParams();
-  p.set("days", $("#f-days").value || "365");
   const m = $("#f-model").value.trim();
   const e = $("#f-endpoint").value.trim();
   const s = $("#f-source").value;
   const k = $("#f-key").value;
+  const d = $("#f-date").value;
+  if (d) {
+    p.set("date", d); // 精确到某天时不再叠加 days 范围
+  } else {
+    p.set("days", $("#f-days").value || "365");
+  }
   if (m) p.set("model", m);
   if (e) p.set("endpoint", e);
   if (s) p.set("source", s);
@@ -227,6 +266,7 @@ async function loadCharts() {
   const daily = await api(`/api/daily?${p}`);
   const hasDaily = daily.length > 0;
   setEmpty("#empty-daily", !hasDaily);
+  dailyDates = daily.map((r) => r.d); // 供柱子下钻
   const labels = daily.map((r) => r.d.slice(5));
   const datasets = Object.keys(CAT_NAMES).map((k) => ({
     label: CAT_NAMES[k],
@@ -251,6 +291,16 @@ async function loadCharts() {
     data: { labels, datasets },
     options: {
       maintainAspectRatio: false,
+      onClick(evt, els) { // 点击某天柱子 → 日志精确跳到那天
+        if (!els.length || !dailyDates[els[0].index]) return;
+        $("#f-date").value = dailyDates[els[0].index];
+        page = 0;
+        refreshAll();
+        $("#calls-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      },
+      onHover(evt, els) { // 有柱子的地方显示手型,提示可点
+        evt.native.target.style.cursor = els.length ? "pointer" : "default";
+      },
       scales: {
         x: { stacked: true, grid: { display: false }, border: { color: tc.border },
              ticks: { color: tc.tick, font: { size: 10 } } },
@@ -385,9 +435,12 @@ async function loadCalls() {
 
   const body = $("#calls-body");
   body.innerHTML = "";
+  let maxId = lastSeenMaxId;
   for (const r of rows) {
     const tr = document.createElement("tr");
     if (r.status_code >= 400) tr.className = "err";
+    if (lastSeenMaxId !== null && r.id > lastSeenMaxId) tr.classList.add("fresh"); // 新调用闪烁
+    if (maxId === null || r.id > maxId) maxId = r.id;
     const tokens = `${fmtN(r.input_cache_hit)} / ${fmtN(r.input_cache_miss)} / ${fmtN(r.output_tokens)}`;
     const tools = `${fmtN(r.search_calls)} / ${fmtN(r.image_search_calls)} / ${fmtN(r.fetch_calls)}`;
     const keyInfo = keysCache.find((k) => k.key_id === r.key_id);
@@ -407,25 +460,46 @@ async function loadCalls() {
     const detail = parts.length ? parts.join(" · ")
                                 : `<span class="zero">–</span>`;
     const detailFull = ["token", "搜索", "抓取", "OCR", "ASR", "TTS"].join(" · ");
+    const high = Number(r.cost_total) >= thresholdCache && Number(r.cost_total) > 0;
     const errBadge = r.error
-      ? `<span class="badge err" title="${String(r.error).replace(/"/g, "&quot;")}">${r.status_code}</span>`
+      ? `<span class="badge err" data-err="1" style="cursor:pointer" title="点击展开错误详情">${r.status_code} ⓘ</span>`
       : "";
     const streamBadge = r.stream
       ? `<span class="badge stream">流式</span>` : `<span class="badge ok">完成</span>`;
     const src = r.source === "demo" ? `<span class="badge demo">演示</span> ` : "";
+    // 模型/Key/端点可点击下钻筛选
+    const modelCell = r.model
+      ? `<span class="linkish" data-drill="model" data-val="${r.model}">${r.model}</span>` : "-";
+    const keyCell = r.key_id
+      ? `<span class="linkish" data-drill="key" data-val="${r.key_id}">${keyName}</span>` : "-";
+    const epCell = `<span class="linkish" data-drill="endpoint" data-val="${r.endpoint}">${r.endpoint}</span>`;
     tr.innerHTML = `
       <td>${r.ts}</td>
-      <td title="${r.protocol}">${r.endpoint}</td>
-      <td>${r.model || "-"}</td>
-      <td>${keyName}</td>
+      <td title="${r.protocol}">${epCell}</td>
+      <td>${modelCell}</td>
+      <td>${keyCell}</td>
       <td class="r num">${tokens}</td>
       <td class="r num">${tools}</td>
       <td>${others.join(" · ") || `<span class="zero">–</span>`}</td>
       <td title="${detailFull}">${detail}</td>
-      <td class="r num cost">${fmtCost(r.cost_total)}</td>
+      <td class="r num cost ${high ? "high" : ""}"
+          ${high ? `title="单笔费用达到告警阈值 ${fmtMoney(thresholdCache)}"` : ""}>${fmtCost(r.cost_total)}${high ? " ⚠" : ""}</td>
       <td>${src}${errBadge || streamBadge}${r.latency_ms ? ` <span class="zero">${r.latency_ms}ms</span>` : ""}</td>`;
     body.appendChild(tr);
+    if (r.error) { // 错误详情行(点击徽章展开/收起)
+      const detailRow = document.createElement("tr");
+      detailRow.className = "err-detail";
+      detailRow.hidden = true;
+      const safe = String(r.error).replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      detailRow.innerHTML = `<td colspan="10"><pre>${safe}</pre></td>`;
+      body.appendChild(detailRow);
+      tr.querySelector("[data-err]").addEventListener("click", () => {
+        detailRow.hidden = !detailRow.hidden;
+      });
+    }
   }
+  lastSeenMaxId = maxId;
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   $("#page-info").textContent = `第 ${page + 1} / ${totalPages} 页 · 共 ${total} 条`;
@@ -515,7 +589,11 @@ async function loadSettings() {
   $("#key-masked").textContent = s.has_key ? `已保存:${s.api_key_masked}` : "";
   $("#inject-usage").checked = !!s.inject_usage;
   $("#webhook-url").value = s.webhook_url || "";
+  $("#webhook-type").value = s.webhook_type || "generic";
   $("#webhook-last").textContent = s.webhook_last_result || "";
+  $("#cost-threshold").value = s.cost_alert_threshold;
+  $("#retention-days").value = s.retention_days;
+  thresholdCache = Number(s.cost_alert_threshold) || 0.5;
 }
 
 async function saveBudget() {
@@ -550,6 +628,85 @@ async function testWebhook() {
   flashMsg(r.ok ? "测试通知已发送" : "发送失败,见右侧结果", r.ok);
 }
 
+async function saveThreshold() {
+  const v = parseFloat($("#cost-threshold").value);
+  await post("/api/settings", { cost_alert_threshold: v > 0 ? v : 0.5 });
+  thresholdCache = v > 0 ? v : 0.5;
+  flashMsg("高价告警阈值已保存");
+  await loadCalls();
+}
+
+async function saveRetention() {
+  const v = parseInt($("#retention-days").value, 10);
+  await post("/api/settings", { retention_days: v > 0 ? v : 90 });
+  flashMsg("数据保留期已保存");
+}
+
+async function cleanupNow() {
+  const r = await post("/api/cleanup");
+  $("#cleanup-msg").textContent = `已清理 ${r.removed} 条 ${r.days} 天前的记录`;
+  flashMsg(`清理完成:${r.removed} 条`);
+  await refreshAll();
+}
+
+async function saveWebhookType() {
+  await post("/api/settings", { webhook_type: $("#webhook-type").value });
+  flashMsg("机器人类型已保存");
+}
+
+async function toggleDesktopNotify() {
+  const on = $("#notify-desktop").checked;
+  localStorage.setItem("dscd-notify", on ? "1" : "0");
+  if (on && typeof Notification !== "undefined" &&
+      Notification.permission !== "granted") {
+    const perm = await Notification.requestPermission();
+    flashMsg(perm === "granted" ? "桌面通知已开启" : "浏览器拒绝了通知权限",
+             perm === "granted");
+    if (perm !== "granted") $("#notify-desktop").checked = false;
+  } else {
+    flashMsg(`桌面通知已${on ? "开启" : "关闭"}`);
+  }
+}
+
+/* ---------- 首跑引导与接入片段 ---------- */
+
+async function seedDemo() {
+  await post("/api/demo/seed");
+  flashMsg("演示数据已生成");
+  page = 0;
+  await refreshAll();
+}
+
+async function wipeDemo() {
+  await post("/api/demo/wipe");
+  flashMsg("演示数据已清除");
+  page = 0;
+  lastSeenMaxId = null;
+  await refreshAll();
+}
+
+function copySnippet(id, btn) {
+  const text = document.getElementById(id).innerText;
+  const done = () => {
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => (btn.textContent = "复制"), 1500);
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); done(); } catch { /* 忽略 */ }
+  document.body.removeChild(ta);
+}
+
 /* ---------- 事件与启动 ---------- */
 
 $("#refresh").addEventListener("click", () => refreshAll());
@@ -562,6 +719,91 @@ $("#prices-save").addEventListener("click", savePrices);
 $("#inject-usage").addEventListener("change", saveInject);
 $("#webhook-save").addEventListener("click", saveWebhook);
 $("#webhook-test").addEventListener("click", testWebhook);
+$("#webhook-type").addEventListener("change", saveWebhookType);
+$("#cost-threshold").addEventListener("change", saveThreshold);
+$("#retention-days").addEventListener("change", saveRetention);
+$("#cleanup-now").addEventListener("click", cleanupNow);
+$("#notify-desktop").addEventListener("change", toggleDesktopNotify);
+$("#demo-seed").addEventListener("click", seedDemo);
+$("#demo-wipe").addEventListener("click", wipeDemo);
+
+// 筛选变更即生效(免点查询);文本输入做 400ms 防抖
+let filterTimer = null;
+const autoApply = () => { page = 0; refreshAll(); };
+const debouncedApply = () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(autoApply, 400);
+};
+$("#f-days").addEventListener("change", autoApply);
+$("#f-key").addEventListener("change", autoApply);
+$("#f-source").addEventListener("change", autoApply);
+$("#f-date").addEventListener("change", autoApply);
+$("#f-model").addEventListener("input", debouncedApply);
+$("#f-endpoint").addEventListener("input", debouncedApply);
+
+// 日志表:点击模型/Key/端点 → 自动填入筛选并刷新(下钻)
+$("#calls-body").addEventListener("click", (evt) => {
+  const t = evt.target.closest("[data-drill]");
+  if (!t) return;
+  const kind = t.dataset.drill;
+  const val = t.dataset.val;
+  if (kind === "model") $("#f-model").value = ($("#f-model").value === val ? "" : val);
+  if (kind === "endpoint") $("#f-endpoint").value = ($("#f-endpoint").value === val ? "" : val);
+  if (kind === "key") {
+    const sel = $("#f-key");
+    if ([...sel.options].some((o) => o.value === val)) sel.value = (sel.value === val ? "" : val);
+    else sel.value = ""; // 该 Key 不在当前统计列表里时,退回全部
+  }
+  page = 0;
+  refreshAll();
+});
+
+// Key 分组面板:点 Key 名也下钻
+$("#keys-body").addEventListener("click", (evt) => {
+  const t = evt.target.closest("tr");
+  if (!t || !t.querySelector("input[data-key-id]")) return;
+  const kid = t.querySelector("input[data-key-id]").dataset.keyId;
+  const sel = $("#f-key");
+  if ([...sel.options].some((o) => o.value === kid)) {
+    sel.value = kid === sel.value ? "" : kid;
+    page = 0;
+    refreshAll();
+  }
+});
+
+// 接入片段复制
+document.querySelectorAll(".copy-btn").forEach((btn) => {
+  btn.addEventListener("click", () => copySnippet(btn.dataset.copy, btn));
+});
+
+/* ---------- 自动刷新(live tail) ---------- */
+
+let autoTimer = null;
+
+function setAutoRefresh(sec) {
+  clearInterval(autoTimer);
+  autoTimer = null;
+  if (Number(sec) > 0) {
+    autoTimer = setInterval(() => {
+      loadSummary();
+      loadBalance();
+      if (page === 0) loadCalls(); // 翻页查看历史时不打扰
+      if (Number(sec) >= 30) loadCharts();
+    }, Number(sec) * 1000);
+  }
+}
+
+$("#auto-refresh").addEventListener("change", () => {
+  const sec = $("#auto-refresh").value;
+  localStorage.setItem("dscd-auto", sec);
+  setAutoRefresh(sec);
+});
+
+(function initAutoRefresh() {
+  const saved = localStorage.getItem("dscd-auto") ?? "30";
+  $("#auto-refresh").value = saved;
+  setAutoRefresh(saved);
+})();
 
 async function refreshAll() {
   await loadKeys(); // 日志表的 Key 列依赖 keysCache,需先加载

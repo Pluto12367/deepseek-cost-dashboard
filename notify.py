@@ -29,6 +29,17 @@ def _level(spend: float, budget: float) -> int:
     return 0
 
 
+def _adapt(kind: str, event: str, text: str, detail: dict) -> dict:
+    """按机器人类型适配 payload:钉钉/飞书/企业微信的文本消息格式各不相同。"""
+    if kind == "dingtalk":
+        return {"msgtype": "text", "text": {"content": text}}
+    if kind == "feishu":
+        return {"msg_type": "text", "content": {"text": text}}
+    if kind == "wecom":
+        return {"msgtype": "text", "text": {"content": text}}
+    return {"event": event, "text": text, **detail}  # generic:结构化 JSON
+
+
 async def _post(url: str, payload: dict) -> str:
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -62,27 +73,26 @@ async def check_and_notify() -> None:
     if state.get("month") == month and (state.get("level") or 0) >= level:
         return  # 本月已推送过同级或更高级别,防骚扰
 
-    payload = {
-        "event": "budget_exceeded" if level == 2 else "budget_warning",
-        "month": month,
-        "month_cost": round(spend, 4),
-        "budget": budget,
-        "percent": round(spend / budget * 100, 1),
-        "source": "deepseek-cost-dashboard",
-        "ts": _now(),
-    }
+    percent = round(spend / budget * 100, 1)
+    event = "budget_exceeded" if level == 2 else "budget_warning"
+    detail = {"month": month, "month_cost": round(spend, 4), "budget": budget,
+              "percent": percent, "source": "deepseek-cost-dashboard", "ts": _now()}
+    text = (f"【DeepSeek 成本告警】{'已超出' if level == 2 else '接近'}月预算:"
+            f"本月 ¥{spend:.2f} / ¥{budget:.2f}({percent}%)")
+    payload = _adapt(db.get_setting("webhook_type") or "generic", event, text, detail)
     result = await _post(url, payload)
     db.set_setting("webhook_state", json.dumps({"month": month, "level": level}))
     db.set_setting("webhook_last_result", result)
 
 
 async def send_test() -> dict:
-    """面板「发送测试」按钮:立即推送一条 test 事件。"""
+    """面板「发送测试」按钮:立即推送一条 test 事件(按所选机器人格式)。"""
     url = db.get_setting("webhook_url")
     if not url:
         return {"ok": False, "reason": "未配置 Webhook URL"}
-    payload = {"event": "test", "message": "DeepSeek 成本监控面板:这是一条测试通知",
-               "ts": _now()}
+    kind = db.get_setting("webhook_type") or "generic"
+    detail = {"source": "deepseek-cost-dashboard", "ts": _now()}
+    payload = _adapt(kind, "test", "【DeepSeek 成本监控】这是一条测试通知,收到即链路正常 ✅", detail)
     result = await _post(url, payload)
     db.set_setting("webhook_last_result", result)
     return {"ok": " HTTP 2" in result, "result": result}
