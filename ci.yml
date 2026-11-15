@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python 3.12)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      # 用 python -m 而不是裸 pytest,保证仓库根目录进入 sys.path,
+      # 测试里的 import db / import estimator 才能找到根目录模块。
+      - name: Run tests
+        id: tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests -q --junitxml=reports/junit.xml
+
+      # pytest 失败时独立保存原始 JUnit 报告,投递失败后证据也不丢。
+      - name: Upload failed test report
+        if: failure() && steps.tests.conclusion == 'failure'
+        uses: actions/upload-artifact@v5
+        with:
+          name: junit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/junit.xml
+          if-no-files-found: error
+          retention-days: 7
+
+      # 先判断本次运行是否具备投递条件(配置齐全、报告存在)。
+      # fork PR 拿不到 Secrets,这里会自然跳过,不会外发。
+      - name: Check CFI delivery inputs
+        id: delivery_check
+        if: failure() && steps.tests.conclusion == 'failure'
+        shell: bash
+        env:
+          CFI_INGEST_URL: ${{ vars.CFI_INGEST_URL }}
+          CFI_INGEST_HMAC_SECRET: ${{ secrets.CFI_INGEST_HMAC_SECRET }}
+        run: |
+          if [[ ! -f "reports/junit.xml" ]]; then
+            echo "CFI 投递准备失败:JUnit 报告不存在。" >&2
+            exit 1
+          fi
+          if [[ -z "$CFI_INGEST_URL" ]]; then
+            echo "CFI 投递配置错误:Repository Variable CFI_INGEST_URL 未配置,跳过投递。" >&2
+            exit 0
+          fi
+          if [[ -z "$CFI_INGEST_HMAC_SECRET" ]]; then
+            echo "CFI 投递配置错误:Repository Secret CFI_INGEST_HMAC_SECRET 未配置,跳过投递。" >&2
+            exit 0
+          fi
+          echo "should_send=true" >> "$GITHUB_OUTPUT"
+          echo "CFI 投递前置检查通过。"
+
+      - name: Send failure report to CFI
+        if: >-
+          failure() && steps.tests.conclusion == 'failure' &&
+          steps.delivery_check.outputs.should_send == 'true'
+        env:
+          CFI_INGEST_URL: ${{ vars.CFI_INGEST_URL }}
+          CFI_INGEST_HMAC_SECRET: ${{ secrets.CFI_INGEST_HMAC_SECRET }}
+          CFI_JUNIT_XML_PATH: reports/junit.xml
+          CFI_GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          CFI_GITHUB_REPOSITORY: ${{ github.repository }}
+          CFI_GITHUB_RUN_ID: ${{ github.run_id }}
+          CFI_GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CFI_GITHUB_WORKFLOW_NAME: ${{ github.workflow }}
+          CFI_GITHUB_JOB_KEY: ${{ github.job }}
+          CFI_GITHUB_JOB_NAME: tests-python-3-12
+          CFI_GITHUB_COMMIT_SHA: ${{ github.sha }}
+          CFI_GITHUB_HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: python scripts/ci/send_ci_failure.py
